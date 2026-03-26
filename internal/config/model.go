@@ -14,6 +14,7 @@ type Settings struct {
 
 // ItemNode represents either a video file or a directory in the config tree.
 // A directory node has a non-nil Items map; a file node has Items == nil.
+
 type ItemNode struct {
 	Settings `yaml:",inline"`
 	Items    map[string]*ItemNode `yaml:"items,omitempty"`

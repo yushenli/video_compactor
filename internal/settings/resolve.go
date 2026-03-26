@@ -21,8 +21,15 @@ var namedResolutionHeights = map[string]int{
 	"720p":  720,
 	"1080p": 1080,
 	"1440p": 1440,
+	"2k":    1440,
 	"4k":    2160,
 	"2160p": 2160,
+}
+
+// IsNamedResolution reports whether res is a known named resolution shorthand.
+func IsNamedResolution(res string) bool {
+	_, ok := namedResolutionHeights[strings.ToLower(res)]
+	return ok
 }
 
 // ResolvedSettings is the fully computed settings for one video file.
@@ -82,13 +89,25 @@ func isRawResolution(s string) bool {
 	return err1 == nil && err2 == nil
 }
 
-// ParseResolution resolves a resolution string to (width, height).
-// Named shorthand → width=0 (aspect-ratio-preserving), height from table.
-// Raw "WxH" or "W*H" → explicit width and height.
-func ParseResolution(res string) (width, height int, err error) {
+// ParseResolution resolves a resolution string to (width, height) for use in an
+// ffmpeg scale filter. srcW and srcH are the source video dimensions (used only
+// for named shorthands to pick the shorter edge); pass 0,0 to fall back to
+// landscape behaviour.
+//
+// Named shorthand:
+//   - Portrait (srcH > srcW): shorter edge is width → (namedH, -2)
+//   - Landscape / unknown:    shorter edge is height → (-2, namedH)
+//
+// Raw "WxH" or "W*H": srcW/srcH ignored; returns (w, h) as-is.
+func ParseResolution(res string, srcW, srcH int) (width, height int, err error) {
 	lower := strings.ToLower(res)
-	if h, ok := namedResolutionHeights[lower]; ok {
-		return 0, h, nil
+	if namedH, ok := namedResolutionHeights[lower]; ok {
+		if srcH > srcW {
+			// Portrait: apply named size to the width (shorter edge)
+			return namedH, -2, nil
+		}
+		// Landscape or unknown: apply named size to the height (shorter edge)
+		return -2, namedH, nil
 	}
 	var sep string
 	if strings.Contains(res, "x") {
