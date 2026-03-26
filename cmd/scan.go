@@ -13,6 +13,7 @@ import (
 func newScanCmd() *cobra.Command {
 	var outputPath string
 	var force bool
+	var filterPattern string
 
 	cmd := &cobra.Command{
 		Use:   "scan <directory>",
@@ -31,7 +32,7 @@ func newScanCmd() *cobra.Command {
 				}
 			}
 
-			cfg, err := scanner.ScanDirectory(dir)
+			cfg, err := scanner.ScanDirectory(dir, filterPattern)
 			if err != nil {
 				return fmt.Errorf("scan failed: %w", err)
 			}
@@ -48,6 +49,7 @@ func newScanCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "output YAML file path (default: <directory>/video_compactor.yaml)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing config file")
+	cmd.Flags().StringVar(&filterPattern, "filter", "", "only include files whose relative path matches this regex (partial match)")
 	return cmd
 }
 

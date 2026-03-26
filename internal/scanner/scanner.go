@@ -1,8 +1,10 @@
 package scanner
 
 import (
+	"fmt"
 	"io/fs"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/yushenli/video_compactor/internal/config"
@@ -18,7 +20,17 @@ var videoExtensions = map[string]bool{
 
 // ScanDirectory walks rootDir, finds video files (skipping *.compressed.* files),
 // and returns a Config whose Items tree mirrors the directory structure.
-func ScanDirectory(rootDir string) (*config.Config, error) {
+// If filterPattern is non-empty, only files whose relative path matches the regex are included.
+func ScanDirectory(rootDir, filterPattern string) (*config.Config, error) {
+	var filterRegex *regexp.Regexp
+	if filterPattern != "" {
+		var err error
+		filterRegex, err = regexp.Compile(filterPattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --filter regex: %w", err)
+		}
+	}
+
 	cfg := &config.Config{
 		Defaults: config.Settings{
 			Codec:   "h265",
@@ -41,6 +53,9 @@ func ScanDirectory(rootDir string) (*config.Config, error) {
 		relPath, err := filepath.Rel(rootDir, path)
 		if err != nil {
 			return err
+		}
+		if filterRegex != nil && !filterRegex.MatchString(relPath) {
+			return nil
 		}
 		insertFileNode(cfg.Items, relPath)
 		return nil
