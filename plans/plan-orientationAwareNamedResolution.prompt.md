@@ -22,16 +22,25 @@ For raw `WxH`: absolute — no orientation logic, no probe.
 ```go
 srcW, srcH := 0, 0
 if settings.IsNamedResolution(s.Resolution) {
-    srcW, srcH, _ = probeVideoDimensions(inputPath)  // error → fallback to 0,0
+    var err error
+    srcW, srcH, err = probeVideoDimensions(inputPath)  // error → fallback to 0,0
+    if err != nil || srcW == 0 || srcH == 0 {
+        fmt.Fprintf(os.Stderr, "[warning] unable to probe ...")
+    }
 }
 scaleArg, err := buildScaleFilter(s.Resolution, srcW, srcH)
 ```
 
-**Probe command:**
+> **Note:** the inner assignment must use `var err error` + `=` (not `:=`) to avoid shadowing the outer `srcW`/`srcH` variables.
+
+**Probe command (JSON format with rotation side_data):**
 ```
-ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 <file>
+ffprobe -v error -select_streams v:0
+        -show_entries stream=width,height
+        -show_entries stream_side_data=rotation
+        -of json <file>
 ```
-Output: `1920x1080`. Parse with `strings.SplitN(..., "x", 2)`.
+The raw stored `width`/`height` may not reflect display orientation (e.g. DJI/iOS/Android cameras store footage with a rotation tag rather than re-encoding). The probe reads `side_data_list[].rotation` and swaps `w`/`h` when rotation is `±90°` or `±270°` to obtain the true display dimensions.
 
 **Fallback:** probe error or `srcW/srcH == 0` → treat as landscape (`-2, namedH`).
 
@@ -44,10 +53,10 @@ Output: `1920x1080`. Parse with `strings.SplitN(..., "x", 2)`.
   - Raw WxH: `srcW/srcH` ignored; returns `(w, h, nil)` unchanged
 
 ### `internal/compressor/ffmpeg.go`
-- Add `probeVideoDimensions(filePath string) (int, int, error)` (unexported)
-- `BuildFFmpegArgs`: call `settings.IsNamedResolution(s.Resolution)` to decide whether to probe; pass `srcW, srcH` to `buildScaleFilter`
+- Add `probeVideoDimensions(filePath string) (int, int, error)` (unexported): uses `-of json` with `stream_side_data=rotation`; swaps `w`/`h` when `abs(rotation) % 360` is `90` or `270` to get true display dimensions
+- `BuildFFmpegArgs`: call `settings.IsNamedResolution(s.Resolution)` to decide whether to probe; use `var err error` + `=` (not `:=`) to avoid variable shadowing; pass `srcW, srcH` to `buildScaleFilter`; emit warning to stderr on probe failure
 - `buildScaleFilter(resolution string, srcW, srcH int)` — passes dims into `settings.ParseResolution`; always emits `scale=%d:%d` (removes `if w == 0` branch)
-- Add `"os/exec"` to imports
+- Add `"os/exec"` and `"encoding/json"` to imports
 
 ## Function Ownership Summary
 
@@ -63,6 +72,6 @@ Output: `1920x1080`. Parse with `strings.SplitN(..., "x", 2)`.
 
 1. `go build ./...` — compiles cleanly
 2. Landscape file (e.g. 1920×1080), `resolution: 1080p` → dry-run shows `scale=-2:1080`
-3. Portrait file (e.g. 1080×1920), `resolution: 1080p` → dry-run shows `scale=1080:-2`
+3. Portrait file with rotation metadata (e.g. DJI stored as 2688×1512 with `rotation: -90`), `resolution: 1080p` → probe swaps to effective 1512×2688, dry-run shows `scale=1080:-2`
 4. Raw `resolution: 1920x1080` → always `scale=1920:1080` (no probe, no `-2`)
 5. Probe fails (bad file / ffprobe not found) → `scale=-2:1080` (safe landscape fallback, no crash)
