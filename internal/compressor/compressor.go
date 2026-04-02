@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/yushenli/video_compactor/internal/config"
+	"github.com/yushenli/video_compactor/internal/filename"
 	"github.com/yushenli/video_compactor/internal/settings"
 )
 
@@ -112,7 +112,7 @@ func walkItems(
 			}
 			*tasks = append(*tasks, CompressTask{
 				InputPath:  absPath,
-				OutputPath: compressedOutputPath(absPath),
+				OutputPath: filename.CompressedOutputPath(absPath),
 				Settings:   resolved,
 			})
 		}
@@ -120,10 +120,8 @@ func walkItems(
 	return nil
 }
 
-// compressedOutputPath returns the output path for a given input.
-// "video.mp4" → "video.compressed.mp4"
+// compressedOutputPath is kept as a package-level alias for backward compatibility.
+// New callers should use filename.CompressedOutputPath directly.
 func compressedOutputPath(inputPath string) string {
-	ext := filepath.Ext(inputPath)
-	stem := strings.TrimSuffix(inputPath, ext)
-	return stem + ".compressed" + ext
+	return filename.CompressedOutputPath(inputPath)
 }

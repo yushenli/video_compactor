@@ -277,3 +277,160 @@ No other external dependencies.
 8. `./video_compactor scan /path/to/videos --filter "action"` — YAML contains only files under `action/`
 9. `./video_compactor scan /path/to/videos --filter "\.mp4$"` — YAML contains only `.mp4` files
 10. `./video_compactor scan /path/to/videos --filter "[invalid"` — prints error and exits non-zero
+
+---
+
+## Filename Remapping for Sort-Order Correctness
+
+### Problem
+
+Action camera filenames (especially GoPro) embed chapter numbers *before* the file number,
+breaking alphabetical sort order. When compressed files are placed together, multi-chapter
+recordings don't sort next to each other.
+
+**Example:** GoPro Hero5+ HEVC files use `GX<cc><nnnn>.MP4` where `cc` = chapter, `nnnn` = file number.
+- `GX011603.MP4` (file 1603, chapter 1) sorts before `GX011604.MP4` (file 1604, chapter 1)
+- But `GX021603.MP4` (file 1603, chapter 2) should be right after `GX011603.MP4`.
+
+### Research: Camera Filename Conventions
+
+#### GoPro
+
+**Hero5+ (2016–present, HEVC/H.265 mode)**
+- Pattern: `GX<cc><nnnn>.MP4`
+  - `GX` = HEVC video prefix
+  - `cc` = 2-digit chapter number (01, 02, 03, …)
+  - `nnnn` = 4-digit file number (0001–9999)
+  - Examples: `GX011603.MP4`, `GX021603.MP4`, `GX031603.MP4`
+- Sorting problem: chapter comes before file number, so chapters of different files interleave.
+
+**Hero5+ (H.264/AVC mode)**
+- Pattern: `GH<cc><nnnn>.MP4`
+  - Same structure as HEVC but with `GH` prefix.
+  - Examples: `GH010042.MP4`, `GH020042.MP4`
+
+**Hero5+ (Looping video)**
+- Pattern: `GL<cc><nnnn>.MP4`
+  - Same structure, `GL` prefix for looping videos.
+
+**Legacy GoPro (Hero1–4)**
+- First chapter: `GOPR<nnnn>.MP4`
+- Subsequent chapters: `GP<cc><nnnn>.MP4` (cc starts at 02)
+  - Examples: `GOPR1603.MP4`, `GP021603.MP4`, `GP031603.MP4`
+- Sorting problem: `GOPR` prefix differs from `GP` prefix, and chapter interleaves.
+
+**GoPro MAX (360 camera)**
+- Pattern: `GS<cc><nnnn>.360`
+  - Same chapter/file structure, `.360` extension.
+
+#### DJI
+
+**Modern DJI Drones & Action Cameras (Mavic 3, Air 3, Mini 4, Osmo Action 4/5, Pocket 3, etc.)**
+- Pattern: `DJI_<YYYYMMDDHHMMSS>_<seq>_D.MP4`
+  - Timestamp-based naming — sorts correctly by default. No remapping needed.
+
+**Older DJI (Mavic Pro, Phantom 4, etc.)**
+- Pattern: `DJI_<nnnn>.MP4`
+  - Simple sequential numbering — sorts correctly. No remapping needed.
+
+#### Google Pixel
+
+Pixel phones use the Google Camera app which names videos with timestamps:
+- Pattern: `PXL_YYYYMMDD_HHMMSS<suffix>.mp4`
+  - `suffix` may include `~2` for burst/duplicate disambiguation, `.TS` for top shot, or be empty.
+  - Examples: `PXL_20240615_143022.mp4`, `PXL_20240615_143022~2.mp4`
+- Older Pixel models or stock Android camera: `VID_YYYYMMDD_HHMMSS.mp4`
+- **Sorts correctly by default. No remapping needed.**
+
+#### Xiaomi
+
+Xiaomi phones (MIUI/HyperOS camera app) use timestamp-based naming:
+- Pattern: `VID_YYYYMMDD_HHMMSS.mp4`
+  - Examples: `VID_20240615_143022.mp4`
+- Some models may use: `MVI_YYYYMMDD_HHMMSS.mp4` or `MIUI_YYYYMMDD_HHMMSS.mp4`
+- **Sorts correctly by default. No remapping needed.**
+
+#### Summary
+
+Only GoPro filenames need remapping. DJI, Google Pixel, and Xiaomi files all use timestamp-based or sequential naming that sorts correctly by default.
+
+### Remapping Rules
+
+| Original Pattern   | Remapped Pattern         | Example                          |
+| ------------------ | ------------------------ | -------------------------------- |
+| `GX<cc><nnnn>.MP4` | `GX<nnnn><letter>.MP4`   | `GX021603.MP4` → `GX1603b.MP4`   |
+| `GH<cc><nnnn>.MP4` | `GH<nnnn><letter>.MP4`   | `GH010042.MP4` → `GH0042a.MP4`   |
+| `GL<cc><nnnn>.MP4` | `GL<nnnn><letter>.MP4`   | `GL030100.MP4` → `GL0100c.MP4`   |
+| `GOPR<nnnn>.MP4`   | `GOPR<nnnn>a.MP4`        | `GOPR1603.MP4` → `GOPR1603a.MP4` |
+| `GP<cc><nnnn>.MP4` | `GOPR<nnnn><letter>.MP4` | `GP021603.MP4` → `GOPR1603b.MP4` |
+| `GS<cc><nnnn>.360` | `GS<nnnn><letter>.360`   | `GS020050.360` → `GS0050b.360`   |
+
+Chapter → letter mapping: `01`→`a`, `02`→`b`, `03`→`c`, … `26`→`z` (26 chapters max; GoPro creates ~4 GB chapters, so even a 100 GB recording only needs ~25).
+
+Files not matching any GoPro pattern pass through unchanged (DJI, phone videos, etc.).
+
+### File Structure Change
+
+```
+internal/
+    filename/
+        remap.go       — RemapFilename() exported function + table-driven rules
+        remap_test.go  — comprehensive tests
+```
+
+### Architecture: Table-Driven Remapping Rules
+
+Rules are maintained as a slice of `RemapRule` structs. Adding a new device/pattern requires only one new line in the table.
+
+```go
+// RemapRule defines a single filename remapping pattern.
+type RemapRule struct {
+    Pattern     *regexp.Regexp // regex with named capture groups: "chapter", "filenum"
+    OutputPrefix string        // static prefix for the output (e.g. "GX", "GOPR")
+    // FormatOutput takes the named captures and returns the remapped basename (no ext).
+    // If nil, a default formatter is used: OutputPrefix + filenum + chapterLetter
+    FormatOutput func(match map[string]string) string
+}
+
+// rules is the ordered table of all remapping rules. First match wins.
+var rules = []RemapRule{
+    // GoPro Hero5+ HEVC:  GX<cc><nnnn>.MP4 → GX<nnnn><letter>.MP4
+    {Pattern: re(`(?i)^(GX)(\d{2})(\d{4})\..+$`), OutputPrefix: "GX"},
+    // GoPro Hero5+ AVC:   GH<cc><nnnn>.MP4 → GH<nnnn><letter>.MP4
+    {Pattern: re(`(?i)^(GH)(\d{2})(\d{4})\..+$`), OutputPrefix: "GH"},
+    // GoPro Looping:      GL<cc><nnnn>.MP4 → GL<nnnn><letter>.MP4
+    {Pattern: re(`(?i)^(GL)(\d{2})(\d{4})\..+$`), OutputPrefix: "GL"},
+    // GoPro MAX 360:      GS<cc><nnnn>.360 → GS<nnnn><letter>.360
+    {Pattern: re(`(?i)^(GS)(\d{2})(\d{4})\..+$`), OutputPrefix: "GS"},
+    // GoPro Legacy first: GOPR<nnnn>.MP4   → GOPR<nnnn>a.MP4  (implicit chapter 01)
+    {Pattern: re(`(?i)^(GOPR)(\d{4})\..+$`),       OutputPrefix: "GOPR", /* chapter forced to "a" */},
+    // GoPro Legacy cont:  GP<cc><nnnn>.MP4 → GOPR<nnnn><letter>.MP4
+    {Pattern: re(`(?i)^(GP)(\d{2})(\d{4})\..+$`),  OutputPrefix: "GOPR"},
+}
+```
+
+Adding support for a new device is a single append to this slice. The default format function handles the common `prefix + filenum + chapterLetter` pattern; only truly unusual formats need a custom `FormatOutput`.
+
+### Implementation Steps
+
+1. **Create `internal/filename/remap.go`** — new package with exported `RemapFilename(basename string) string`. Uses the table-driven `[]RemapRule` slice; iterates rules in order, first match wins. Non-matching filenames returned unchanged. The rule table and `RemapRule` type are also exported so other projects can inspect or extend them.
+
+2. **Create `internal/filename/remap_test.go`** — tests covering all 6 GoPro patterns, non-matching files (DJI, Pixel, Xiaomi, generic), edge cases (case-insensitive prefix, sidecar files `.LRV`/`.THM`), and boundary conditions (chapter 26 → `z`).
+
+3. **Export `CompressedOutputPath`** — refactor the unexported `compressedOutputPath` in `internal/compressor/compressor.go` to an exported `CompressedOutputPath`. Apply `filename.RemapFilename` to the basename before inserting the `.compressed` suffix. Update callers.
+
+4. **Verify** — `go build ./...` and `go test ./...`
+
+### Output Naming After Remapping
+
+The `.compressed` suffix is inserted between stem and extension, *after* remapping:
+
+```
+GX021603.MP4  →  remap  →  GX1603b.MP4  →  compressed  →  GX1603b.compressed.MP4
+```
+
+### Verification (Remapping)
+
+11. `go test ./internal/filename/...` — all remapping rules covered
+12. Dry-run compress with GoPro files — output paths show remapped names
+13. Verify that non-GoPro filenames (DJI, phone) pass through unchanged
