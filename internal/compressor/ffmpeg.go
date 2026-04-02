@@ -86,7 +86,12 @@ func probeVideoDimensions(filePath string) (int, int, error) {
 	if err != nil {
 		return 0, 0, err
 	}
+	return parseProbeOutput(out)
+}
 
+// parseProbeOutput parses ffprobe JSON output and returns the effective display
+// (width, height), swapping dimensions when rotation metadata indicates ±90°/±270°.
+func parseProbeOutput(data []byte) (int, int, error) {
 	var probe struct {
 		Streams []struct {
 			Width        int `json:"width"`
@@ -96,7 +101,7 @@ func probeVideoDimensions(filePath string) (int, int, error) {
 			} `json:"side_data_list"`
 		} `json:"streams"`
 	}
-	if err := json.Unmarshal(out, &probe); err != nil {
+	if err := json.Unmarshal(data, &probe); err != nil {
 		return 0, 0, fmt.Errorf("failed to parse ffprobe output: %w", err)
 	}
 	if len(probe.Streams) == 0 {
