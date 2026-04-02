@@ -54,8 +54,32 @@ func BuildFFmpegArgs(inputPath, outputPath string, s settings.ResolvedSettings) 
 		args = append(args, "-x265-params", "lossless=1")
 	}
 
+	// Preserve all metadata from input (global tags, creation_time, GPS atoms, etc.).
+	// -map_metadata 0 is ffmpeg's default but being explicit is safer and self-documenting.
+	// use_metadata_tags tells the MP4 muxer to write user-defined atoms (e.g. GPS ©xyz);
+	// faststart moves the moov atom to the front for streaming compatibility.
+	args = append(args,
+		"-map_metadata", "0",
+		"-movflags", "+use_metadata_tags+faststart",
+	)
+
 	args = append(args, "-c:a", "copy", outputPath)
 	return args
+}
+
+// CopyFileTimestamp copies the modification time of src to dst.
+// Call this after a successful ffmpeg run so the output file retains the
+// original recording date instead of the current time.
+func CopyFileTimestamp(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", src, err)
+	}
+	mtime := info.ModTime()
+	if err := os.Chtimes(dst, mtime, mtime); err != nil {
+		return fmt.Errorf("chtimes %s: %w", dst, err)
+	}
+	return nil
 }
 
 // buildScaleFilter converts a resolution string to an ffmpeg scale filter value.

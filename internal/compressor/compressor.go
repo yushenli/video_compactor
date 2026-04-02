@@ -2,6 +2,7 @@ package compressor
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -58,6 +59,12 @@ func CompressAll(cfg *config.Config, rootDir string, opts CompressOptions) error
 					firstErr = err
 				}
 				mu.Unlock()
+				return
+			}
+			if !opts.DryRun {
+				if tsErr := CopyFileTimestamp(t.InputPath, t.OutputPath); tsErr != nil {
+					fmt.Fprintf(os.Stderr, "[warning] could not copy timestamp for %s: %v\n", t.OutputPath, tsErr)
+				}
 			}
 		}(task)
 	}

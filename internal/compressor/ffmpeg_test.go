@@ -1,7 +1,9 @@
 package compressor
 
 import (
+	"os"
 	"testing"
+	"time"
 
 	"github.com/yushenli/video_compactor/internal/settings"
 )
@@ -285,6 +287,16 @@ func TestBuildFFmpegArgsStructure(t *testing.T) {
 			s:       settings.ResolvedSettings{CRF: 23, Codec: "h265"},
 			wantSeq: []string{"-crf", "23"},
 		},
+		{
+			name:    "map_metadata_always_present",
+			s:       settings.ResolvedSettings{CRF: 28, Codec: "h265"},
+			wantSeq: []string{"-map_metadata", "0"},
+		},
+		{
+			name:    "movflags_always_present",
+			s:       settings.ResolvedSettings{CRF: 28, Codec: "h265"},
+			wantSeq: []string{"-movflags", "+use_metadata_tags+faststart"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -297,4 +309,59 @@ func TestBuildFFmpegArgsStructure(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCopyFileTimestamp(t *testing.T) {
+	t.Run("copies_mtime_to_dst", func(t *testing.T) {
+		src, err := os.CreateTemp(t.TempDir(), "src-*.mp4")
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.Close()
+
+		dst, err := os.CreateTemp(t.TempDir(), "dst-*.mp4")
+		if err != nil {
+			t.Fatal(err)
+		}
+		dst.Close()
+
+		// Set a known mtime on src (2 days ago).
+		wantTime := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+		if err := os.Chtimes(src.Name(), wantTime, wantTime); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := CopyFileTimestamp(src.Name(), dst.Name()); err != nil {
+			t.Fatalf("CopyFileTimestamp unexpected error: %v", err)
+		}
+
+		dstInfo, err := os.Stat(dst.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotTime := dstInfo.ModTime().Truncate(time.Second)
+		if !gotTime.Equal(wantTime) {
+			t.Errorf("dst mtime = %v, want %v", gotTime, wantTime)
+		}
+	})
+
+	t.Run("error_on_missing_src", func(t *testing.T) {
+		err := CopyFileTimestamp("/nonexistent/src.mp4", "/nonexistent/dst.mp4")
+		if err == nil {
+			t.Fatal("expected error for missing src, got nil")
+		}
+	})
+
+	t.Run("error_on_missing_dst", func(t *testing.T) {
+		src, err := os.CreateTemp(t.TempDir(), "src-*.mp4")
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.Close()
+
+		err = CopyFileTimestamp(src.Name(), "/nonexistent/dst.mp4")
+		if err == nil {
+			t.Fatal("expected error for missing dst, got nil")
+		}
+	})
 }

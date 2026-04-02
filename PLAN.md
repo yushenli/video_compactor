@@ -434,3 +434,68 @@ GX021603.MP4  →  remap  →  GX1603b.MP4  →  compressed  →  GX1603b.compre
 11. `go test ./internal/filename/...` — all remapping rules covered
 12. Dry-run compress with GoPro files — output paths show remapped names
 13. Verify that non-GoPro filenames (DJI, phone) pass through unchanged
+
+---
+
+## Preserve Video Metadata
+
+### Problem
+
+The current `BuildFFmpegArgs()` produces commands like:
+```
+ffmpeg -i input.mp4 -c:v libx265 -crf 28 -c:a copy output.mp4
+```
+
+While ffmpeg copies some global metadata by default, it does **not** reliably preserve:
+
+1. **GPS coordinates** — stored in custom MP4/MOV atoms (e.g., Apple's `©xyz` atom or
+   `com.apple.quicktime.location.ISO6709`). These proprietary atoms are silently dropped
+   during remuxing.
+2. **Custom/proprietary metadata** — camera-specific tags, shooting parameters stored as
+   user-defined atoms.
+3. **File-system timestamps** — the output file gets the current time as its mtime, losing
+   the original creation/modification date.
+
+Creation time stored in the standard `creation_time` global metadata key is preserved by
+default, but being explicit with `-map_metadata 0` is safer and more portable.
+
+Audio stream metadata is already preserved via `-c:a copy` (stream copy retains all
+stream-level tags).
+
+### Changes
+
+#### 1. Add `-map_metadata 0` and `-movflags` to `BuildFFmpegArgs()`
+
+- `-map_metadata 0` — explicitly copies all global and per-stream metadata from input #0.
+  This is ffmpeg's default, but being explicit documents intent and guards against future
+  ffmpeg default changes.
+- `-movflags +use_metadata_tags+faststart` — instructs the MP4 muxer to write user-defined
+  metadata tags, preserving custom atoms like GPS coordinates that would otherwise be
+  silently dropped. `faststart` is included for better streaming compatibility.
+
+**File**: `internal/compressor/ffmpeg.go` — `BuildFFmpegArgs()`
+
+#### 2. Copy file-system timestamps (mtime) after ffmpeg
+
+After ffmpeg produces the output file, copy the source file's modification time (mtime)
+to the output. This keeps the compressed file's date consistent with the original.
+
+Implementation:
+- New helper `CopyFileTimestamp(src, dst string) error` in `internal/compressor/`
+- Called in `CompressAll()` after `ExecuteFFmpeg()` succeeds
+- Skipped when in dry-run/preview mode (since no output file is created)
+
+**Files**: `internal/compressor/ffmpeg.go` (helper), `internal/compressor/compressor.go` (caller)
+
+### Todos
+
+1. Add `-map_metadata 0` and `-movflags +use_metadata_tags+faststart` to `BuildFFmpegArgs()` — `internal/compressor/ffmpeg.go`
+2. Update/add tests in `internal/compressor/ffmpeg_test.go` for the new args
+3. Implement `CopyFileTimestamp()` and wire it into `CompressAll()` — skip in dry-run mode
+4. Add unit tests for `CopyFileTimestamp()`
+
+### Verification (Metadata)
+
+1. `go test ./internal/compressor/...` — all metadata-related tests pass
+2. Dry-run shows `-map_metadata 0` and `-movflags +use_metadata_tags+faststart` in preview output
+3. After Phase 2 (real ffmpeg execution): verify GPS/creation_time survive round-trip with `ffprobe -show_format output.mp4`
