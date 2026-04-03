@@ -47,6 +47,6 @@ func newCompressCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&configPath, "file", "f", "", "YAML config file path (default: <directory>/video_compactor.yaml)")
 	cmd.Flags().IntVarP(&maxJobs, "jobs", "j", 1, "number of parallel ffmpeg jobs")
 	cmd.Flags().StringVar(&codec, "codec", "", "global codec override: h264 or h265")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print ffmpeg commands without executing (currently always active)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print ffmpeg commands without executing")
 	return cmd
 }

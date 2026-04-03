@@ -13,13 +13,8 @@ import (
 
 // BuildFFmpegArgs constructs the ffmpeg argument list (not including the "ffmpeg" binary itself).
 func BuildFFmpegArgs(inputPath, outputPath string, s settings.ResolvedSettings) []string {
-	codec := s.Codec
-	if codec == "" {
-		codec = "h265"
-	}
-
 	var libCodec string
-	switch codec {
+	switch s.Codec {
 	case "h264":
 		libCodec = "libx264"
 	default:
@@ -50,7 +45,7 @@ func BuildFFmpegArgs(inputPath, outputPath string, s settings.ResolvedSettings) 
 	}
 
 	// Lossless flag: only for h265 with CRF 0
-	if s.CRF == 0 && codec == "h265" {
+	if s.CRF == 0 && s.Codec == "h265" {
 		args = append(args, "-x265-params", "lossless=1")
 	}
 
@@ -150,8 +145,19 @@ func parseProbeOutput(data []byte) (int, int, error) {
 	return w, h, nil
 }
 
-// ExecuteFFmpeg is a Phase 1 stub: it prints the planned ffmpeg command instead of running it.
-func ExecuteFFmpeg(args []string, _ bool) error {
-	fmt.Printf("[preview] ffmpeg %s\n", strings.Join(args, " "))
+// ExecuteFFmpeg runs ffmpeg with the given arguments.
+// When dryRun is true it only prints the command without executing.
+func ExecuteFFmpeg(args []string, dryRun bool) error {
+	if dryRun {
+		fmt.Printf("[dry-run] ffmpeg %s\n", strings.Join(args, " "))
+		return nil
+	}
+
+	cmd := exec.Command("ffmpeg", append([]string{"-y", "-loglevel", "warning"}, args...)...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ffmpeg failed: %w", err)
+	}
 	return nil
 }

@@ -1,10 +1,13 @@
 package compressor
 
 import (
+	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yushenli/video_compactor/internal/config"
+	"github.com/yushenli/video_compactor/internal/settings"
 )
 
 var defaultConfig = config.Config{
@@ -229,5 +232,69 @@ func TestCompressAllInvalidQualityError(t *testing.T) {
 	err := CompressAll(cfg, "/root", CompressOptions{MaxJobs: 1})
 	if err == nil {
 		t.Fatal("expected error for invalid quality, got nil")
+	}
+}
+
+func TestFprintTaskTable(t *testing.T) {
+	tasks := []CompressTask{
+		{
+			InputPath:  "/videos/vacation/clip.mp4",
+			OutputPath: "/videos/vacation/clip.compressed.mp4",
+			Settings:   settings.ResolvedSettings{CRF: 28, Codec: "h265", Resolution: "1080p"},
+		},
+		{
+			InputPath:  "/videos/birthday.mov",
+			OutputPath: "/videos/birthday.compressed.mov",
+			Settings:   settings.ResolvedSettings{CRF: 23, Codec: "h264"},
+		},
+	}
+
+	var buf bytes.Buffer
+	fprintTaskTable(&buf, tasks)
+	out := buf.String()
+
+	// Output column should show only the base filename, not the full path.
+	if strings.Contains(out, "/videos/vacation/clip.compressed.mp4") {
+		t.Error("output column should contain only base filename, but found full path")
+	}
+	if !strings.Contains(out, "clip.compressed.mp4") {
+		t.Error("expected base filename clip.compressed.mp4 in output")
+	}
+	if !strings.Contains(out, "birthday.compressed.mov") {
+		t.Error("expected base filename birthday.compressed.mov in output")
+	}
+
+	// Input column should still show full paths.
+	if !strings.Contains(out, "/videos/vacation/clip.mp4") {
+		t.Error("expected full input path in table")
+	}
+
+	// Check resolution fallback for empty resolution.
+	if !strings.Contains(out, "(keep)") {
+		t.Error("expected (keep) for empty resolution")
+	}
+	if !strings.Contains(out, "1080p") {
+		t.Error("expected 1080p resolution in table")
+	}
+
+	// Check codec values.
+	if !strings.Contains(out, "h264") {
+		t.Error("expected h264 codec in table")
+	}
+}
+
+func TestFprintTaskTableDisplaysResolvedCodec(t *testing.T) {
+	tasks := []CompressTask{
+		{
+			InputPath:  "a.mp4",
+			OutputPath: "a.compressed.mp4",
+			Settings:   settings.ResolvedSettings{CRF: 28, Codec: "h265"},
+		},
+	}
+
+	var buf bytes.Buffer
+	fprintTaskTable(&buf, tasks)
+	if !strings.Contains(buf.String(), "h265") {
+		t.Error("expected resolved codec h265 in table")
 	}
 }

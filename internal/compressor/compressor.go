@@ -2,10 +2,13 @@ package compressor
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"text/tabwriter"
 
 	"github.com/yushenli/video_compactor/internal/config"
 	"github.com/yushenli/video_compactor/internal/filename"
@@ -36,10 +39,15 @@ func CompressAll(cfg *config.Config, rootDir string, opts CompressOptions) error
 		return nil
 	}
 
+	printTaskTable(tasks)
+
 	maxJobs := opts.MaxJobs
 	if maxJobs < 1 {
 		maxJobs = 1
 	}
+
+	total := len(tasks)
+	var completed int64
 
 	sem := make(chan struct{}, maxJobs)
 	var wg sync.WaitGroup
@@ -66,11 +74,35 @@ func CompressAll(cfg *config.Config, rootDir string, opts CompressOptions) error
 					fmt.Fprintf(os.Stderr, "[warning] could not copy timestamp for %s: %v\n", t.OutputPath, tsErr)
 				}
 			}
+			n := atomic.AddInt64(&completed, 1)
+			fmt.Printf("[progress] %d out of %d videos compressed\n", n, total)
 		}(task)
 	}
 
 	wg.Wait()
 	return firstErr
+}
+
+// printTaskTable prints a formatted table of all compression tasks.
+func printTaskTable(tasks []CompressTask) {
+	fprintTaskTable(os.Stdout, tasks)
+}
+
+// fprintTaskTable writes the task table to w, using only the base filename for output paths.
+func fprintTaskTable(dest io.Writer, tasks []CompressTask) {
+	w := tabwriter.NewWriter(dest, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "#\tInput\tOutput\tCodec\tCRF\tResolution")
+	fmt.Fprintln(w, "-\t-----\t------\t-----\t---\t----------")
+	for i, t := range tasks {
+		res := t.Settings.Resolution
+		if res == "" {
+			res = "(keep)"
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%d\t%s\n",
+			i+1, t.InputPath, filepath.Base(t.OutputPath), t.Settings.Codec, t.Settings.CRF, res)
+	}
+	w.Flush()
+	fmt.Fprintln(dest)
 }
 
 func buildTaskList(cfg *config.Config, rootDir string) ([]CompressTask, error) {
