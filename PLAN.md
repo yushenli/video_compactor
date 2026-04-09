@@ -727,6 +727,30 @@ func init() {
 }
 ```
 
+##### `internal/compressor/compressor.go` — Skip already-compressed files
+
+In the `walkItems` function, after checking `resolved.Skip`, add a check for completed compressed
+status. A file with `CompressedStatus != nil && !CompressedStatus.Unfinished` should be skipped
+(it was already successfully compressed and hasn't been removed from the config by the user):
+
+```go
+// File node: resolve settings and add task if not skipped
+resolved, err := settings.ResolveForFile(defaults, settingsStack, node.Settings)
+if err != nil {
+    return fmt.Errorf("%s: %w", absPath, err)
+}
+if resolved.Skip {
+    continue
+}
+// Skip files already successfully compressed
+if node.CompressedStatus != nil && !node.CompressedStatus.Unfinished {
+    continue
+}
+```
+
+This is consistent with the scan design: if the user removes the `compressed_status` field from
+a video entry, it will be treated as a fresh file and compressed again.
+
 #### New files
 
 ##### `internal/probe/probe.go` — ffprobe helpers for duration, size, bitrate
@@ -850,8 +874,9 @@ items:
 3. **Create probe tests** — new `internal/probe/probe_test.go`
 4. **Enhance scanner** — modify `internal/scanner/scanner.go` to detect and probe compressed files
 5. **Add scanner tests for compressed status** — update `internal/scanner/scanner_test.go`
-6. **Create deleter package** — new `internal/deleter/deleter.go` with deletion logic & size formatting
-7. **Create deleter tests** — new `internal/deleter/deleter_test.go`
-8. **Add delete CLI command** — new `cmd/delete.go` with `--dryrun` / `-d` flag (default true)
-9. **Register delete command** — update `cmd/root.go`
-10. **Config roundtrip test** — update `internal/config/io_test.go` for CompressedStatus serialization
+6. **Skip compressed in compress command** — modify `internal/compressor/compressor.go` `walkItems` to skip files with completed `CompressedStatus`
+7. **Create deleter package** — new `internal/deleter/deleter.go` with deletion logic & size formatting
+8. **Create deleter tests** — new `internal/deleter/deleter_test.go`
+9. **Add delete CLI command** — new `cmd/delete.go` with `--dryrun` / `-d` flag (default true)
+10. **Register delete command** — update `cmd/root.go`
+11. **Config roundtrip test** — update `internal/config/io_test.go` for CompressedStatus serialization
