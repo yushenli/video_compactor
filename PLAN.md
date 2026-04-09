@@ -602,3 +602,256 @@ Add a **HW** column: shows the VA-API device path when active, or `(sw)` for sof
 1. `go test ./internal/compressor/...` — all tests pass
 2. `--dry-run --vaapi-device /dev/dri/renderD128` shows correct VA-API command in preview
 3. Without `--vaapi-device`, dry-run output is unchanged (software encoding)
+
+## Cleanup already compressed files
+
+### Background
+
+ After videos files listed in the YAML config file have been compressed, the user may choose to run
+ the tool again to remove the original files in order to save disk space.
+
+### How cleanup works
+
+The cleanup process involves two steps. The first step involves calling the scan command one more time,
+which will find out which original files have been already compressed. The second step involves running
+a new sub-command called "delete", which will actually removed the original files.
+
+#### The "scan" step
+
+When the tool walks through a directory in the scan sub-command, for each video file it sees, it should
+check if the target file already exists. If it does, the tool should do the following:
+1. Check if the previous compression work completed. This should be done by checking if the target
+   video's length is within a 2-second difference from the original video. This step is necessary
+   as sometimes compress works are interrupted and leaves a half done output file.
+2. If the target video is considered completed, find out the *size* an d *average video stream bitrate*
+   of *both* the original file and the target file.
+3. In the output YAML file, for each matched video file, add a new block called `compressed_status`. For
+   target videos not within a 2-second difference from the original video, add a field called `unfinished`
+   and set its value to true. For other matched videos, add the following fields:
+   1. compressed_ratio: the size of the target file divided by the original file, expressed in a
+      percentage, rounded to the nearest full number.
+   2. bitrate_origin: The bitrate of the original video, in kbps.
+   3. bitrate_target: The bitrate of the target video, in kbps.
+   Notes:
+   1. *Do not* generate the `compressed_status` field for original videos not matched to a compressed one.
+   2. *Do not* generate the `unfinished` field for the completed ones.
+4. The YAML file will be generated the same way as a normal scan. The user may choose the examine the
+   output. The user may choose to delete the `compressed_status` field from a video, and if they do so,
+   that file will just work as a regular file in the YAML. In another words, if the user runs the `compress`
+   command afterwards, that video file will be compressed again.
+
+#### The "delete" step
+
+A new sub-command called "delete" should be created. It will also take a directory name and the YAML
+filename as the input. It then looks at all the video files with a `compressed_status` and without the
+`unfinished` field and delete the file permanently.
+
+The sub-command should come with a --dry-run flag, which is **by default set to true**. In dry run mode
+it will print out the full filenames of all the files to be deleted.
+
+The tool should also output the size of each file and total size to be deleted, in human readable
+format (i.e. using the closest GB or MB). This should be done both in dryrun and non-dryrun mode.
+
+### Implementation Design
+
+#### Clarifications from design review
+
+- **Target file discovery**: Use the existing `filename.CompressedOutputPath()` function to derive the
+  expected compressed file path from the original.
+- **Bitrate fields**: `bitrate_origin` and `bitrate_target` refer to the **video stream bitrate only**
+  (not overall file bitrate including audio).
+- **`unfinished` field value**: Should be `true` (not `false`) when the target is incomplete.
+- **Delete target**: The delete command only deletes the **original** file (keeps the compressed one).
+- **Delete error handling**: If a file fails to delete (e.g., permission denied), continue deleting
+  other files, collect errors, print a summary of failures at the end, and exit with non-zero status.
+- **ffprobe failure during scan**: If ffprobe fails on either the original or compressed file, log a
+  warning to stderr and mark the file as `unfinished: true` so the user can manually inspect.
+
+#### Changes to existing files
+
+##### `internal/config/model.go` — Add CompressedStatus struct
+
+Add a new struct and a pointer field on `ItemNode`:
+
+```go
+// CompressedStatus holds metadata about a previously compressed output file.
+// Present only when the scanner detects a matching .compressed.* file.
+type CompressedStatus struct {
+    Unfinished      bool   `yaml:"unfinished,omitempty"`
+    CompressedRatio string `yaml:"compressed_ratio,omitempty"` // e.g. "42%"
+    BitrateOrigin   int    `yaml:"bitrate_origin,omitempty"`   // kbps, rounded
+    BitrateTarget   int    `yaml:"bitrate_target,omitempty"`   // kbps, rounded
+}
+
+type ItemNode struct {
+    Settings         `yaml:",inline"`
+    CompressedStatus *CompressedStatus        `yaml:"compressed_status,omitempty"`
+    Items            map[string]*ItemNode     `yaml:"items,omitempty"`
+}
+```
+
+Using a pointer (`*CompressedStatus`) so that:
+- `nil` → field omitted from YAML (no compressed file found)
+- `&CompressedStatus{Unfinished: true}` → `compressed_status: { unfinished: true }`
+- `&CompressedStatus{CompressedRatio: "42%", ...}` → full stats (Unfinished is false/zero-value → omitted)
+
+##### `internal/scanner/scanner.go` — Probe compressed status during scan
+
+Modify the `ScanDirectory` / `insertFileNode` workflow:
+
+1. After determining a file is a video and not a `.compressed.*` file, compute the target path via
+   `filename.CompressedOutputPath(absPath)`.
+2. `os.Stat()` the target path. If it doesn't exist, proceed as before (no `CompressedStatus`).
+3. If the target exists, call a new `probeCompressedStatus(originalPath, targetPath)` function that:
+   - Probes duration of both files using ffprobe.
+   - If ffprobe fails on either file, logs a warning and returns `&CompressedStatus{Unfinished: true}`.
+   - If durations differ by more than 2 seconds, returns `&CompressedStatus{Unfinished: true}`.
+   - Otherwise, probes file size (`os.Stat`) and video stream bitrate (rounded to nearest kbps)
+     for both files, computes `compressed_ratio` (as a string like `"42%"`), and returns the full
+     `CompressedStatus`.
+4. Attach the `CompressedStatus` to the `ItemNode`.
+
+The `insertFileNode` function signature changes to accept an optional `*CompressedStatus`:
+
+```go
+func insertFileNode(items map[string]*config.ItemNode, relPath string, cs *config.CompressedStatus)
+```
+
+##### `cmd/root.go` — Register the delete command
+
+```go
+func init() {
+    rootCmd.AddCommand(newScanCmd())
+    rootCmd.AddCommand(newCompressCmd())
+    rootCmd.AddCommand(newDeleteCmd())
+}
+```
+
+#### New files
+
+##### `internal/probe/probe.go` — ffprobe helpers for duration, size, bitrate
+
+New package `internal/probe` with exported functions:
+
+```go
+package probe
+
+// VideoDuration returns the duration of a video file in seconds.
+// Uses: ffprobe -v error -show_entries format=duration -of json <file>
+func VideoDuration(filePath string) (float64, error)
+
+// VideoStreamBitrate returns the average bitrate of the first video stream in kbps,
+// rounded to the nearest integer.
+// Uses: ffprobe -v error -select_streams v:0 -show_entries stream=bit_rate -of json <file>
+// If the stream bit_rate is "N/A" (common for some codecs), falls back to computing
+// it from format size and duration.
+func VideoStreamBitrate(filePath string) (int, error)
+```
+
+File size is obtained via `os.Stat()` directly in the scanner — no need for a probe helper.
+
+##### `internal/probe/probe_test.go` — Unit tests
+
+- Test `parseVideoDuration` (internal JSON parser) with sample ffprobe outputs.
+- Test `parseVideoStreamBitrate` with sample outputs including "N/A" fallback.
+- Integration tests can be skipped in CI if ffprobe isn't available.
+
+##### `cmd/delete.go` — Delete subcommand
+
+```go
+func newDeleteCmd() *cobra.Command {
+    var configPath string
+    var dryRun bool  // default: true
+
+    cmd := &cobra.Command{
+        Use:   "delete <directory>",
+        Short: "Delete original video files that have been successfully compressed",
+        Args:  cobra.ExactArgs(1),
+        RunE: func(cmd *cobra.Command, args []string) error {
+            dir := args[0]
+            cfg, err := config.LoadConfig(configPath)
+            // ... walk tree, collect deletable files, execute
+            return deleter.DeleteOriginals(cfg, dir, dryRun)
+        },
+    }
+    cmd.Flags().StringVarP(&configPath, "file", "f", "", "YAML config file")
+    cmd.Flags().BoolVarP(&dryRun, "dryrun", "d", true, "list files without deleting (default: true)")
+    return cmd
+}
+```
+
+##### `internal/deleter/deleter.go` — Deletion logic
+
+```go
+package deleter
+
+// DeleteOriginals walks the config tree and deletes original video files
+// that have a CompressedStatus without the Unfinished flag.
+func DeleteOriginals(cfg *config.Config, rootDir string, dryRun bool) error
+```
+
+The function:
+1. Recursively walks `cfg.Items`, building a sorted list of files to delete.
+2. A file qualifies for deletion when:
+   - `node.CompressedStatus != nil`
+   - `node.CompressedStatus.Unfinished == false`
+3. Resolves the full path using `rootDir + relative path from tree`.
+4. Gets file size via `os.Stat()`.
+5. Prints each file with its size in human-readable format (e.g., `1.2 GB`, `345 MB`).
+6. If `!dryRun`, calls `os.Remove()`. On failure, records the error and continues.
+7. Prints total size at the end.
+8. If any deletions failed, prints failure summary and returns a non-nil error.
+
+##### `internal/deleter/deleter_test.go` — Unit tests
+
+- Test tree walking and file qualification logic.
+- Test human-readable size formatting.
+- Test dry-run vs actual deletion using temp directories.
+- Test error collection when files fail to delete.
+
+#### Human-readable size formatting
+
+Utility function (in `internal/deleter/` or a shared `internal/util/` package):
+
+```go
+// FormatSize returns a human-readable size string.
+// Uses the nearest unit: bytes, KB, MB, or GB.
+func FormatSize(bytes int64) string
+```
+
+Rules:
+- < 1 KB → "N bytes"
+- < 1 MB → "N KB"
+- < 1 GB → "N.N MB"
+- ≥ 1 GB → "N.N GB"
+
+#### Example YAML output (after scan with compressed status)
+
+```yaml
+defaults:
+  quality: normal
+  codec: h265
+items:
+  vacation.mp4:
+    compressed_status:
+      compressed_ratio: "42%"
+      bitrate_origin: 5200
+      bitrate_target: 2184
+  broken_recording.mp4:
+    compressed_status:
+      unfinished: true
+  not_yet_compressed.mp4: {}
+```
+
+#### Task breakdown
+
+1. **Add CompressedStatus to config model** — modify `internal/config/model.go`
+2. **Create probe package** — new `internal/probe/probe.go` with duration & bitrate helpers
+3. **Create probe tests** — new `internal/probe/probe_test.go`
+4. **Enhance scanner** — modify `internal/scanner/scanner.go` to detect and probe compressed files
+5. **Add scanner tests for compressed status** — update `internal/scanner/scanner_test.go`
+6. **Create deleter package** — new `internal/deleter/deleter.go` with deletion logic & size formatting
+7. **Create deleter tests** — new `internal/deleter/deleter_test.go`
+8. **Add delete CLI command** — new `cmd/delete.go` with `--dryrun` / `-d` flag (default true)
+9. **Register delete command** — update `cmd/root.go`
+10. **Config roundtrip test** — update `internal/config/io_test.go` for CompressedStatus serialization
