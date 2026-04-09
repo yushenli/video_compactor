@@ -24,8 +24,9 @@ type CompressTask struct {
 
 // CompressOptions carries the runtime options for the compress command.
 type CompressOptions struct {
-	MaxJobs int
-	DryRun  bool
+	MaxJobs     int
+	DryRun      bool
+	VAAPIDevice string // empty = software encoding; non-empty = VA-API device path (e.g. /dev/dri/renderD128)
 }
 
 // CompressAll builds the task list from cfg and executes them with opts.MaxJobs parallelism.
@@ -39,7 +40,7 @@ func CompressAll(cfg *config.Config, rootDir string, opts CompressOptions) error
 		return nil
 	}
 
-	printTaskTable(tasks)
+	printTaskTable(tasks, opts.VAAPIDevice)
 
 	maxJobs := opts.MaxJobs
 	if maxJobs < 1 {
@@ -60,7 +61,7 @@ func CompressAll(cfg *config.Config, rootDir string, opts CompressOptions) error
 		go func(t CompressTask) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			args := BuildFFmpegArgs(t.InputPath, t.OutputPath, t.Settings)
+			args := BuildFFmpegArgs(t.InputPath, t.OutputPath, t.Settings, opts.VAAPIDevice)
 			if err := ExecuteFFmpeg(args, opts.DryRun); err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -84,12 +85,18 @@ func CompressAll(cfg *config.Config, rootDir string, opts CompressOptions) error
 }
 
 // printTaskTable prints a formatted table of all compression tasks.
-func printTaskTable(tasks []CompressTask) {
-	fprintTaskTable(os.Stdout, tasks)
+func printTaskTable(tasks []CompressTask, vaAPIDevice string) {
+	fprintTaskTable(os.Stdout, tasks, vaAPIDevice)
 }
 
-// fprintTaskTable writes the task table to w, using only the base filename for output paths.
-func fprintTaskTable(dest io.Writer, tasks []CompressTask) {
+// fprintTaskTable writes the task table to dest, using only the base filename for output paths.
+// vaAPIDevice is printed once as a header line; it is not repeated per row.
+func fprintTaskTable(dest io.Writer, tasks []CompressTask, vaAPIDevice string) {
+	if vaAPIDevice != "" {
+		fmt.Fprintf(dest, "Hardware acceleration: %s\n", vaAPIDevice)
+	} else {
+		fmt.Fprintln(dest, "Hardware acceleration: (software)")
+	}
 	w := tabwriter.NewWriter(dest, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "#\tInput\tOutput\tCodec\tCRF\tResolution")
 	fmt.Fprintln(w, "-\t-----\t------\t-----\t---\t----------")

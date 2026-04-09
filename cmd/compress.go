@@ -14,6 +14,7 @@ func newCompressCmd() *cobra.Command {
 	var maxJobs int
 	var codec string
 	var dryRun bool
+	var vaAPIDevice string
 
 	cmd := &cobra.Command{
 		Use:   "compress <directory>",
@@ -37,8 +38,9 @@ func newCompressCmd() *cobra.Command {
 			}
 
 			opts := compressor.CompressOptions{
-				MaxJobs: maxJobs,
-				DryRun:  dryRun,
+				MaxJobs:     maxJobs,
+				DryRun:      dryRun,
+				VAAPIDevice: vaAPIDevice,
 			}
 			return compressor.CompressAll(cfg, dir, opts)
 		},
@@ -48,5 +50,6 @@ func newCompressCmd() *cobra.Command {
 	cmd.Flags().IntVarP(&maxJobs, "jobs", "j", 1, "number of parallel ffmpeg jobs")
 	cmd.Flags().StringVar(&codec, "codec", "", "global codec override: h264 or h265")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print ffmpeg commands without executing")
+	cmd.Flags().StringVar(&vaAPIDevice, "vaapi-device", "", "enable VA-API hardware acceleration using this device (e.g. /dev/dri/renderD128)")
 	return cmd
 }

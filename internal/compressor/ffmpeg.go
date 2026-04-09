@@ -12,7 +12,13 @@ import (
 )
 
 // BuildFFmpegArgs constructs the ffmpeg argument list (not including the "ffmpeg" binary itself).
-func BuildFFmpegArgs(inputPath, outputPath string, s settings.ResolvedSettings) []string {
+// vaAPIDevice, if non-empty, enables VA-API hardware encoding using the specified device
+// (e.g. "/dev/dri/renderD128").
+func BuildFFmpegArgs(inputPath, outputPath string, s settings.ResolvedSettings, vaAPIDevice string) []string {
+	if vaAPIDevice != "" {
+		return buildVAAPIArgs(inputPath, outputPath, s, vaAPIDevice)
+	}
+
 	var libCodec string
 	switch s.Codec {
 	case "h264":
@@ -75,6 +81,72 @@ func CopyFileTimestamp(src, dst string) error {
 		return fmt.Errorf("chtimes %s: %w", dst, err)
 	}
 	return nil
+}
+
+// buildVAAPIArgs constructs the ffmpeg argument list for VA-API hardware-accelerated encoding.
+func buildVAAPIArgs(inputPath, outputPath string, s settings.ResolvedSettings, vaAPIDevice string) []string {
+	var hwCodec string
+	switch s.Codec {
+	case "h264":
+		hwCodec = "h264_vaapi"
+	default:
+		hwCodec = "hevc_vaapi"
+	}
+
+	args := []string{
+		"-vaapi_device", vaAPIDevice,
+		"-i", inputPath,
+	}
+
+	// Build the VA-API video filter chain (always required to upload frames to GPU).
+	srcW, srcH := 0, 0
+	if s.Resolution != "" && settings.IsNamedResolution(s.Resolution) {
+		var err error
+		srcW, srcH, err = probeVideoDimensions(inputPath)
+		if err != nil || srcW == 0 || srcH == 0 {
+			fmt.Fprintf(os.Stderr, "[warning] unable to probe video dimensions for %s, result: %dx%d, error: %v. Named resolution scaling may not work as expected\n", inputPath, srcW, srcH, err)
+		}
+	}
+	vf, err := buildVAAPIFilterChain(s.Resolution, srcW, srcH)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warning] invalid resolution %q for %s: %v — scaling skipped\n", s.Resolution, inputPath, err)
+		vf = "format=nv12|vaapi,hwupload"
+	}
+	args = append(args, "-vf", vf)
+
+	args = append(args,
+		"-c:v", hwCodec,
+		"-qp", strconv.Itoa(s.CRF),
+	)
+
+	// Lossless (CRF 0) is not supported by VA-API encoders.
+	if s.CRF == 0 {
+		fmt.Fprintf(os.Stderr, "[warning] lossless encoding (CRF 0) is not supported with VA-API — encoding at QP 0 (near-lossless)\n")
+	}
+
+	args = append(args,
+		"-map_metadata", "0",
+		"-movflags", "+use_metadata_tags+faststart",
+		"-c:a", "copy",
+		outputPath,
+	)
+	return args
+}
+
+// buildVAAPIFilterChain returns the ffmpeg -vf value for VA-API encoding.
+// When resolution is empty it returns the bare upload chain.
+// When resolution is set it appends a scale_vaapi filter, reusing the same
+// -2 sentinel logic as the software scale filter.
+func buildVAAPIFilterChain(resolution string, srcW, srcH int) (string, error) {
+	const upload = "format=nv12|vaapi,hwupload"
+	if resolution == "" {
+		return upload, nil
+	}
+	w, h, err := settings.ParseResolution(resolution, srcW, srcH)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s,scale_vaapi=w=%d:h=%d", upload, w, h), nil
 }
 
 // buildScaleFilter converts a resolution string to an ffmpeg scale filter value.
@@ -153,6 +225,7 @@ func ExecuteFFmpeg(args []string, dryRun bool) error {
 		return nil
 	}
 
+	fmt.Printf("Running ffmpeg %s\n", strings.Join(args, " "))
 	cmd := exec.Command("ffmpeg", append([]string{"-y", "-loglevel", "warning"}, args...)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

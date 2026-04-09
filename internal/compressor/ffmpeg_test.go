@@ -161,7 +161,7 @@ func TestBuildFFmpegArgsCodec(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := BuildFFmpegArgs("in.mp4", "out.mp4", tc.s)
+			args := BuildFFmpegArgs("in.mp4", "out.mp4", tc.s, "")
 			if !argsContainSeq(args, tc.wantSeq...) {
 				t.Errorf("expected %v in args, got %v", tc.wantSeq, args)
 			}
@@ -205,7 +205,7 @@ func TestBuildFFmpegArgsResolution(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := BuildFFmpegArgs(tc.inputFile, "out.mp4", tc.s)
+			args := BuildFFmpegArgs(tc.inputFile, "out.mp4", tc.s, "")
 			if tc.wantSeq != nil && !argsContainSeq(args, tc.wantSeq...) {
 				t.Errorf("expected %v in args, got %v", tc.wantSeq, args)
 			}
@@ -245,7 +245,7 @@ func TestBuildFFmpegArgsLossless(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := BuildFFmpegArgs("in.mp4", "out.mp4", tc.s)
+			args := BuildFFmpegArgs("in.mp4", "out.mp4", tc.s, "")
 			if tc.wantSeq != nil && !argsContainSeq(args, tc.wantSeq...) {
 				t.Errorf("expected %v in args, got %v", tc.wantSeq, args)
 			}
@@ -300,7 +300,7 @@ func TestBuildFFmpegArgsStructure(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := BuildFFmpegArgs("in.mp4", "out.mp4", tc.s)
+			args := BuildFFmpegArgs("in.mp4", "out.mp4", tc.s, "")
 			if tc.wantSeq != nil && !argsContainSeq(args, tc.wantSeq...) {
 				t.Errorf("expected %v in args, got %v", tc.wantSeq, args)
 			}
@@ -362,6 +362,200 @@ func TestCopyFileTimestamp(t *testing.T) {
 		err = CopyFileTimestamp(src.Name(), "/nonexistent/dst.mp4")
 		if err == nil {
 			t.Fatal("expected error for missing dst, got nil")
+		}
+	})
+}
+
+func TestBuildVAAPIFilterChain(t *testing.T) {
+	tests := []struct {
+		name       string
+		resolution string
+		srcW, srcH int
+		wantFilter string
+		wantErr    bool
+	}{
+		{
+			name:       "no_resolution_bare_upload",
+			resolution: "",
+			wantFilter: "format=nv12|vaapi,hwupload",
+		},
+		{
+			name:       "raw_1920x1080",
+			resolution: "1920x1080",
+			wantFilter: "format=nv12|vaapi,hwupload,scale_vaapi=w=1920:h=1080",
+		},
+		{
+			name:       "named_1080p_landscape",
+			resolution: "1080p",
+			srcW:       1920, srcH: 1080,
+			wantFilter: "format=nv12|vaapi,hwupload,scale_vaapi=w=-2:h=1080",
+		},
+		{
+			name:       "named_1080p_portrait",
+			resolution: "1080p",
+			srcW:       1080, srcH: 1920,
+			wantFilter: "format=nv12|vaapi,hwupload,scale_vaapi=w=1080:h=-2",
+		},
+		{
+			name:       "named_720p_zero_dims_landscape_fallback",
+			resolution: "720p",
+			srcW:       0, srcH: 0,
+			wantFilter: "format=nv12|vaapi,hwupload,scale_vaapi=w=-2:h=720",
+		},
+		{
+			name:       "invalid_resolution_returns_error",
+			resolution: "invalid",
+			wantErr:    true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildVAAPIFilterChain(tc.resolution, tc.srcW, tc.srcH)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("buildVAAPIFilterChain(%q) expected error, got nil", tc.resolution)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildVAAPIFilterChain(%q) unexpected error: %v", tc.resolution, err)
+			}
+			if got != tc.wantFilter {
+				t.Errorf("buildVAAPIFilterChain(%q, %d, %d) = %q, want %q", tc.resolution, tc.srcW, tc.srcH, got, tc.wantFilter)
+			}
+		})
+	}
+}
+
+func TestBuildFFmpegArgsVAAPI(t *testing.T) {
+	const device = "/dev/dri/renderD128"
+
+	tests := []struct {
+		name        string
+		s           settings.ResolvedSettings
+		wantSeqs    [][]string // all sequences must be present
+		absentArgs  []string   // none of these args may appear
+		wantLastArg string
+	}{
+		{
+			name: "vaapi_device_prepended_before_input",
+			s:    settings.ResolvedSettings{CRF: 28, Codec: "h265"},
+			wantSeqs: [][]string{
+				{"-vaapi_device", device},
+				{"-i", "in.mp4"},
+			},
+		},
+		{
+			name: "h265_uses_hevc_vaapi",
+			s:    settings.ResolvedSettings{CRF: 28, Codec: "h265"},
+			wantSeqs: [][]string{
+				{"-c:v", "hevc_vaapi"},
+			},
+			absentArgs: []string{"libx265"},
+		},
+		{
+			name: "h264_uses_h264_vaapi",
+			s:    settings.ResolvedSettings{CRF: 28, Codec: "h264"},
+			wantSeqs: [][]string{
+				{"-c:v", "h264_vaapi"},
+			},
+			absentArgs: []string{"libx264"},
+		},
+		{
+			name: "quality_uses_qp_not_crf",
+			s:    settings.ResolvedSettings{CRF: 28, Codec: "h265"},
+			wantSeqs: [][]string{
+				{"-qp", "28"},
+			},
+			absentArgs: []string{"-crf"},
+		},
+		{
+			name: "no_resolution_bare_upload_vf",
+			s:    settings.ResolvedSettings{CRF: 28, Codec: "h265"},
+			wantSeqs: [][]string{
+				{"-vf", "format=nv12|vaapi,hwupload"},
+			},
+		},
+		{
+			name: "raw_resolution_scale_vaapi",
+			s:    settings.ResolvedSettings{CRF: 28, Codec: "h265", Resolution: "1920x1080"},
+			wantSeqs: [][]string{
+				{"-vf", "format=nv12|vaapi,hwupload,scale_vaapi=w=1920:h=1080"},
+			},
+		},
+		{
+			name: "named_resolution_nonexistent_file_landscape_fallback",
+			s:    settings.ResolvedSettings{CRF: 28, Codec: "h265", Resolution: "1080p"},
+			wantSeqs: [][]string{
+				{"-vf", "format=nv12|vaapi,hwupload,scale_vaapi=w=-2:h=1080"},
+			},
+		},
+		{
+			name: "metadata_and_audio_flags_present",
+			s:    settings.ResolvedSettings{CRF: 28, Codec: "h265"},
+			wantSeqs: [][]string{
+				{"-map_metadata", "0"},
+				{"-movflags", "+use_metadata_tags+faststart"},
+				{"-c:a", "copy"},
+			},
+		},
+		{
+			name:        "output_path_is_last_arg",
+			s:           settings.ResolvedSettings{CRF: 28, Codec: "h265"},
+			wantLastArg: "out.mp4",
+		},
+		{
+			name:       "no_x265_params_lossless_with_vaapi",
+			s:          settings.ResolvedSettings{CRF: 0, Codec: "h265"},
+			absentArgs: []string{"-x265-params"},
+		},
+		{
+			// An invalid resolution triggers the buildVAAPIFilterChain error path;
+			// scaling is skipped and the bare upload filter chain is used.
+			name: "invalid_resolution_falls_back_to_bare_upload",
+			s:    settings.ResolvedSettings{CRF: 28, Codec: "h265", Resolution: "fullhd"},
+			wantSeqs: [][]string{
+				{"-vf", "format=nv12|vaapi,hwupload"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := BuildFFmpegArgs("in.mp4", "out.mp4", tc.s, device)
+
+			for _, seq := range tc.wantSeqs {
+				if !argsContainSeq(args, seq...) {
+					t.Errorf("expected sequence %v in args, got %v", seq, args)
+				}
+			}
+			for _, absent := range tc.absentArgs {
+				for _, a := range args {
+					if a == absent {
+						t.Errorf("expected %q to be absent, but found it in %v", absent, args)
+					}
+				}
+			}
+			if tc.wantLastArg != "" && (len(args) == 0 || args[len(args)-1] != tc.wantLastArg) {
+				t.Errorf("expected last arg %q, got %v", tc.wantLastArg, args)
+			}
+		})
+	}
+}
+
+func TestExecuteFFmpegNonDryRun(t *testing.T) {
+	// Verify the non-dry-run path: ffmpeg is invoked for real.
+	// Using "-version" causes ffmpeg to print its version and exit 0 immediately.
+	t.Run("succeeds_with_version_flag", func(t *testing.T) {
+		if err := ExecuteFFmpeg([]string{"-version"}, false); err != nil {
+			t.Errorf("expected no error running ffmpeg -version, got: %v", err)
+		}
+	})
+
+	// Verify the error path: ffmpeg exits non-zero and the error is propagated.
+	t.Run("returns_error_on_ffmpeg_failure", func(t *testing.T) {
+		if err := ExecuteFFmpeg([]string{"-i", "nonexistent_input_file_that_does_not_exist.mp4"}, false); err == nil {
+			t.Error("expected error when ffmpeg fails, got nil")
 		}
 	})
 }

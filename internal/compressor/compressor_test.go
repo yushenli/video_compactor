@@ -250,7 +250,7 @@ func TestFprintTaskTable(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	fprintTaskTable(&buf, tasks)
+	fprintTaskTable(&buf, tasks, "")
 	out := buf.String()
 
 	// Output column should show only the base filename, not the full path.
@@ -293,8 +293,38 @@ func TestFprintTaskTableDisplaysResolvedCodec(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	fprintTaskTable(&buf, tasks)
+	fprintTaskTable(&buf, tasks, "")
 	if !strings.Contains(buf.String(), "h265") {
 		t.Error("expected resolved codec h265 in table")
 	}
+}
+
+func TestFprintTaskTableHWHeader(t *testing.T) {
+	tasks := []CompressTask{
+		{
+			InputPath:  "a.mp4",
+			OutputPath: "a.compressed.mp4",
+			Settings:   settings.ResolvedSettings{CRF: 28, Codec: "h265"},
+		},
+	}
+
+	t.Run("software_shows_software_header", func(t *testing.T) {
+		var buf bytes.Buffer
+		fprintTaskTable(&buf, tasks, "")
+		if !strings.Contains(buf.String(), "(software)") {
+			t.Error("expected (software) in hardware acceleration header")
+		}
+	})
+
+	t.Run("vaapi_shows_device_path_in_header", func(t *testing.T) {
+		var buf bytes.Buffer
+		fprintTaskTable(&buf, tasks, "/dev/dri/renderD128")
+		out := buf.String()
+		if !strings.Contains(out, "/dev/dri/renderD128") {
+			t.Error("expected VA-API device path in hardware acceleration header")
+		}
+		if strings.Contains(out, "(software)") {
+			t.Error("expected (software) to be absent when VA-API device is set")
+		}
+	})
 }

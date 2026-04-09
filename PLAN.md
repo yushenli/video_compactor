@@ -499,3 +499,106 @@ Implementation:
 1. `go test ./internal/compressor/...` — all metadata-related tests pass
 2. Dry-run shows `-map_metadata 0` and `-movflags +use_metadata_tags+faststart` in preview output
 3. After Phase 2 (real ffmpeg execution): verify GPS/creation_time survive round-trip with `ffprobe -show_format output.mp4`
+
+---
+
+## VA-API Hardware Acceleration
+
+### Background
+
+VA-API (Video Acceleration API) is a Linux interface for GPU-accelerated video encoding/decoding. Using it with ffmpeg can dramatically reduce CPU usage and encoding time on systems with compatible Intel, AMD, or other VA-API-capable GPUs.
+
+The VA-API device is typically `/dev/dri/renderD128` but can vary per system.
+
+### How VA-API changes the ffmpeg command
+
+**Software (current):**
+```
+ffmpeg -i input.mp4 -c:v libx265 -crf 28 -vf scale=-2:1080 ... output.mp4
+```
+
+**VA-API (h265):**
+```
+ffmpeg -vaapi_device /dev/dri/renderD128 -i input.mp4 \
+  -vf 'format=nv12|vaapi,hwupload,scale_vaapi=w=-2:h=1080' \
+  -c:v hevc_vaapi -qp 28 ... output.mp4
+```
+
+Key differences when VA-API is active:
+
+| Aspect          | Software                  | VA-API                                              |
+| --------------- | ------------------------- | --------------------------------------------------- |
+| Codec (h264)    | `libx264`                 | `h264_vaapi`                                        |
+| Codec (h265)    | `libx265`                 | `hevc_vaapi`                                        |
+| Quality flag    | `-crf N`                  | `-qp N`                                             |
+| Video filter    | `scale=W:H` (optional)    | `format=nv12\|vaapi,hwupload[,scale_vaapi=w=W:h=H]` |
+| Lossless        | `-x265-params lossless=1` | Not supported — print a warning and skip            |
+| `-vaapi_device` | n/a                       | prepended before `-i`                               |
+
+The `format=nv12|vaapi,hwupload` step converts frames to NV12 pixel format and uploads them to the GPU. The `scale_vaapi` filter then runs on the GPU. Without scaling, the filter chain is just `format=nv12|vaapi,hwupload`.
+
+### Design
+
+VA-API is **opt-in** via a new `--vaapi-device` CLI flag. When the flag is absent (or empty), behaviour is unchanged (software encoding).
+
+#### 1. New `--vaapi-device` CLI flag (`cmd/compress.go`)
+
+```
+--vaapi-device <path>   enable VA-API hardware acceleration using this device
+                        (e.g. /dev/dri/renderD128); omit to use software encoding
+```
+
+#### 2. `CompressOptions` gains a `VAAPIDevice` field (`internal/compressor/compressor.go`)
+
+```go
+type CompressOptions struct {
+    MaxJobs     int
+    DryRun      bool
+    VAAPIDevice string  // empty = software encoding
+}
+```
+
+Passed straight through to `BuildFFmpegArgs`.
+
+#### 3. `BuildFFmpegArgs` signature change (`internal/compressor/ffmpeg.go`)
+
+Add `vaAPIDevice string` parameter (or use an options struct). When non-empty:
+
+- Prepend `-vaapi_device <device>` before `-i`
+- Use `h264_vaapi` / `hevc_vaapi` instead of `libx264` / `libx265`
+- Replace `-crf N` with `-qp N`
+- Build the VA-API video filter chain:
+  - No scaling: `-vf format=nv12|vaapi,hwupload`
+  - With scaling: `-vf format=nv12|vaapi,hwupload,scale_vaapi=w=W:h=H`
+  - The `-2` sentinel works the same way in `scale_vaapi`
+- Skip `-x265-params lossless=1`; emit a stderr warning when CRF is 0 and VA-API is active
+
+#### 4. New helper: `buildVAAPIFilterChain` (`internal/compressor/ffmpeg.go`)
+
+Builds the full `-vf` value for VA-API mode:
+
+```go
+func buildVAAPIFilterChain(resolution string, srcW, srcH int) (string, error)
+```
+
+- No resolution → `"format=nv12|vaapi,hwupload"`
+- With resolution → `"format=nv12|vaapi,hwupload,scale_vaapi=w=W:h=H"` (reuses `settings.ParseResolution`)
+
+#### 5. Task table (`internal/compressor/compressor.go`)
+
+Add a **HW** column: shows the VA-API device path when active, or `(sw)` for software.
+
+### Todos
+
+1. Add `VAAPIDevice string` to `CompressOptions`; thread it through `CompressAll` → `BuildFFmpegArgs`
+2. Add `--vaapi-device` CLI flag in `cmd/compress.go`
+3. Implement VA-API codepath in `BuildFFmpegArgs` — device flag, codec mapping, `-qp`, lossless warning
+4. Implement `buildVAAPIFilterChain` helper
+5. Update `printTaskTable` / `fprintTaskTable` with HW column
+6. Add tests for VA-API args, filter chain, and codec mapping
+
+### Verification (VA-API)
+
+1. `go test ./internal/compressor/...` — all tests pass
+2. `--dry-run --vaapi-device /dev/dri/renderD128` shows correct VA-API command in preview
+3. Without `--vaapi-device`, dry-run output is unchanged (software encoding)
