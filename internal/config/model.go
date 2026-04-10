@@ -12,12 +12,21 @@ type Settings struct {
 	Skip       bool   `yaml:"skip,omitempty"`
 }
 
+// CompressedStatus holds metadata about a previously compressed output file.
+// Present only when the scanner detects a matching .compressed.* file.
+type CompressedStatus struct {
+	Unfinished      bool   `yaml:"unfinished,omitempty"`
+	CompressedRatio string `yaml:"compressed_ratio,omitempty"` // e.g. "42%"
+	BitrateOrigin   int    `yaml:"bitrate_origin,omitempty"`   // video stream kbps, rounded
+	BitrateTarget   int    `yaml:"bitrate_target,omitempty"`   // video stream kbps, rounded
+}
+
 // ItemNode represents either a video file or a directory in the config tree.
 // A directory node has a non-nil Items map; a file node has Items == nil.
-
 type ItemNode struct {
-	Settings `yaml:",inline"`
-	Items    map[string]*ItemNode `yaml:"items,omitempty"`
+	Settings         `yaml:",inline"`
+	CompressedStatus *CompressedStatus    `yaml:"compressed_status,omitempty"`
+	Items            map[string]*ItemNode `yaml:"items,omitempty"`
 }
 
 // Config is the top-level YAML document structure.

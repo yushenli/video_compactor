@@ -235,6 +235,41 @@ func TestCompressAllInvalidQualityError(t *testing.T) {
 	}
 }
 
+func TestBuildTaskListSkipsCompletedCompressedStatus(t *testing.T) {
+	cfg := defaultConfig
+	cfg.Items = map[string]*config.ItemNode{
+		"completed.mp4": {
+			CompressedStatus: &config.CompressedStatus{
+				CompressedRatio: "42%",
+				BitrateOrigin:   5200,
+				BitrateTarget:   2184,
+			},
+		},
+		"unfinished.mp4": {
+			CompressedStatus: &config.CompressedStatus{Unfinished: true},
+		},
+		// Explicit Unfinished: false — treated as successfully compressed, skipped.
+		"explicit_false_unfinished.mp4": {
+			CompressedStatus: &config.CompressedStatus{Unfinished: false},
+		},
+		"normal.mp4": {},
+	}
+	tasks, err := buildTaskList(&cfg, "/root")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks (unfinished + normal), got %d", len(tasks))
+	}
+	// Sorted alphabetically: normal.mp4, unfinished.mp4
+	if tasks[0].InputPath != filepath.Join("/root", "normal.mp4") {
+		t.Errorf("expected normal.mp4 first, got %q", tasks[0].InputPath)
+	}
+	if tasks[1].InputPath != filepath.Join("/root", "unfinished.mp4") {
+		t.Errorf("expected unfinished.mp4 second, got %q", tasks[1].InputPath)
+	}
+}
+
 func TestFprintTaskTable(t *testing.T) {
 	tasks := []CompressTask{
 		{

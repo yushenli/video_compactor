@@ -3,11 +3,16 @@ package scanner
 import (
 	"fmt"
 	"io/fs"
+	"math"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/yushenli/video_compactor/internal/config"
+	"github.com/yushenli/video_compactor/internal/filename"
+	"github.com/yushenli/video_compactor/internal/probe"
 )
 
 var videoExtensions = map[string]bool{
@@ -18,9 +23,17 @@ var videoExtensions = map[string]bool{
 	".mpg": true,
 }
 
+// probeFunc type aliases allow tests to stub out ffprobe calls.
+var (
+	probeDuration = probe.VideoDuration
+	probeBitrate  = probe.VideoStreamBitrate
+)
+
 // ScanDirectory walks rootDir, finds video files (skipping *.compressed.* files),
 // and returns a Config whose Items tree mirrors the directory structure.
 // If filterPattern is non-empty, only files whose relative path matches the regex are included.
+// For each original video file, if a compressed target already exists, the scanner
+// probes both files and populates a CompressedStatus on the resulting ItemNode.
 func ScanDirectory(rootDir, filterPattern string) (*config.Config, error) {
 	var filterRegex *regexp.Regexp
 	if filterPattern != "" {
@@ -57,13 +70,75 @@ func ScanDirectory(rootDir, filterPattern string) (*config.Config, error) {
 		if filterRegex != nil && !filterRegex.MatchString(relPath) {
 			return nil
 		}
-		insertFileNode(cfg.Items, relPath)
+
+		cs := probeCompressedStatus(path)
+		insertFileNode(cfg.Items, relPath, cs)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// probeCompressedStatus checks whether a compressed target file exists for the
+// given original file and returns a CompressedStatus describing the result.
+// Returns nil when no compressed target exists.
+func probeCompressedStatus(originalPath string) *config.CompressedStatus {
+	targetPath := filename.CompressedOutputPath(originalPath)
+	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	origDuration, err := probeDuration(originalPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warning] could not probe duration for %s: %v — marking as unfinished\n", originalPath, err)
+		return &config.CompressedStatus{Unfinished: true}
+	}
+	targetDuration, err := probeDuration(targetPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warning] could not probe duration for %s: %v — marking as unfinished\n", targetPath, err)
+		return &config.CompressedStatus{Unfinished: true}
+	}
+
+	diff := origDuration - targetDuration
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 2*time.Second {
+		return &config.CompressedStatus{Unfinished: true}
+	}
+
+	origInfo, err := os.Stat(originalPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warning] could not stat %s: %v — marking as unfinished\n", originalPath, err)
+		return &config.CompressedStatus{Unfinished: true}
+	}
+	targetInfo, err := os.Stat(targetPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warning] could not stat %s: %v — marking as unfinished\n", targetPath, err)
+		return &config.CompressedStatus{Unfinished: true}
+	}
+
+	origBitrate, err := probeBitrate(originalPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warning] could not probe bitrate for %s: %v — marking as unfinished\n", originalPath, err)
+		return &config.CompressedStatus{Unfinished: true}
+	}
+	targetBitrate, err := probeBitrate(targetPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warning] could not probe bitrate for %s: %v — marking as unfinished\n", targetPath, err)
+		return &config.CompressedStatus{Unfinished: true}
+	}
+
+	ratio := float64(targetInfo.Size()) / float64(origInfo.Size()) * 100
+	ratioStr := fmt.Sprintf("%d%%", int(math.Round(ratio)))
+
+	return &config.CompressedStatus{
+		CompressedRatio: ratioStr,
+		BitrateOrigin:   origBitrate,
+		BitrateTarget:   targetBitrate,
+	}
 }
 
 func isVideoFile(name string) bool {
@@ -81,14 +156,15 @@ func isCompressedFile(name string) bool {
 
 // insertFileNode inserts a file at relPath into the items map,
 // creating intermediate directory nodes as needed.
-func insertFileNode(items map[string]*config.ItemNode, relPath string) {
+// If cs is non-nil, it is attached to the leaf file node.
+func insertFileNode(items map[string]*config.ItemNode, relPath string, cs *config.CompressedStatus) {
 	parts := strings.Split(relPath, string(filepath.Separator))
 	current := items
 	for i, part := range parts {
 		if i == len(parts)-1 {
 			// Leaf: file node
 			if _, exists := current[part]; !exists {
-				current[part] = &config.ItemNode{}
+				current[part] = &config.ItemNode{CompressedStatus: cs}
 			}
 			return
 		}

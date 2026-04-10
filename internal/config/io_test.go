@@ -128,3 +128,96 @@ func TestSaveConfigOverwritesExisting(t *testing.T) {
 		t.Errorf("expected quality 'high' after overwrite, got %q", loaded.Defaults.Quality)
 	}
 }
+
+func TestSaveLoadRoundTripWithCompressedStatus(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test_cs.yaml")
+
+	original := &Config{
+		Defaults: Settings{Quality: "normal", Codec: "h265"},
+		Items: map[string]*ItemNode{
+			"completed.mp4": {
+				CompressedStatus: &CompressedStatus{
+					CompressedRatio: "42%",
+					BitrateOrigin:   5200,
+					BitrateTarget:   2184,
+				},
+			},
+			"unfinished.mp4": {
+				CompressedStatus: &CompressedStatus{Unfinished: true},
+			},
+			"no_status.mp4": {},
+		},
+	}
+
+	if err := SaveConfig(original, path); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	// Verify completed file preserves all fields.
+	completed := loaded.Items["completed.mp4"]
+	if completed == nil || completed.CompressedStatus == nil {
+		t.Fatal("completed.mp4 should have CompressedStatus")
+	}
+	if completed.CompressedStatus.Unfinished {
+		t.Error("completed.mp4 should not be unfinished")
+	}
+	if completed.CompressedStatus.CompressedRatio != "42%" {
+		t.Errorf("CompressedRatio = %q, want %q", completed.CompressedStatus.CompressedRatio, "42%")
+	}
+	if completed.CompressedStatus.BitrateOrigin != 5200 {
+		t.Errorf("BitrateOrigin = %d, want 5200", completed.CompressedStatus.BitrateOrigin)
+	}
+	if completed.CompressedStatus.BitrateTarget != 2184 {
+		t.Errorf("BitrateTarget = %d, want 2184", completed.CompressedStatus.BitrateTarget)
+	}
+
+	// Verify unfinished file.
+	unfinished := loaded.Items["unfinished.mp4"]
+	if unfinished == nil || unfinished.CompressedStatus == nil {
+		t.Fatal("unfinished.mp4 should have CompressedStatus")
+	}
+	if !unfinished.CompressedStatus.Unfinished {
+		t.Error("unfinished.mp4 should be unfinished")
+	}
+	if unfinished.CompressedStatus.CompressedRatio != "" {
+		t.Errorf("unfinished should have no CompressedRatio, got %q", unfinished.CompressedStatus.CompressedRatio)
+	}
+
+	// Verify file without status.
+	noStatus := loaded.Items["no_status.mp4"]
+	if noStatus == nil {
+		t.Fatal("no_status.mp4 should exist")
+	}
+	if noStatus.CompressedStatus != nil {
+		t.Errorf("no_status.mp4 should have nil CompressedStatus, got %+v", noStatus.CompressedStatus)
+	}
+}
+
+func TestCompressedStatusOmittedFromYAMLWhenNil(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no_cs.yaml")
+
+	cfg := &Config{
+		Defaults: Settings{Quality: "normal"},
+		Items:    map[string]*ItemNode{"video.mp4": {}},
+	}
+	if err := SaveConfig(cfg, path); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(data), "compressed_status") {
+		t.Error("YAML should not contain compressed_status when it is nil")
+	}
+}

@@ -156,6 +156,10 @@ func walkItems(
 			if resolved.Skip {
 				continue
 			}
+			// Skip files already successfully compressed
+			if node.CompressedStatus != nil && !node.CompressedStatus.Unfinished {
+				continue
+			}
 			*tasks = append(*tasks, CompressTask{
 				InputPath:  absPath,
 				OutputPath: filename.CompressedOutputPath(absPath),

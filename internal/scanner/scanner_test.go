@@ -1,10 +1,12 @@
 package scanner
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yushenli/video_compactor/internal/config"
 )
@@ -197,12 +199,12 @@ func TestInsertFileNodeExistingFileNodeBecomesDir(t *testing.T) {
 	// a subsequent insertion treats it as a directory parent.
 	items := make(map[string]*config.ItemNode)
 	// First: insert "foo" as a file node.
-	insertFileNode(items, "foo")
+	insertFileNode(items, "foo", nil)
 	if items["foo"] == nil || items["foo"].Items != nil {
 		t.Fatal("expected foo to be a file node (Items==nil)")
 	}
 	// Second: insert "foo/bar.mp4" — foo must be promoted to a directory node.
-	insertFileNode(items, "foo/bar.mp4")
+	insertFileNode(items, "foo/bar.mp4", nil)
 	if items["foo"].Items == nil {
 		t.Fatal("expected foo to become a directory node after inserting a child")
 	}
@@ -223,5 +225,225 @@ func TestScanDirectoryDefaultsSet(t *testing.T) {
 	}
 	if cfg.Defaults.Quality != "normal" {
 		t.Errorf("expected default quality normal, got %q", cfg.Defaults.Quality)
+	}
+}
+
+func TestProbeCompressedStatusNoTarget(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	makeFile(t, origPath)
+
+	cs := probeCompressedStatus(origPath)
+	if cs != nil {
+		t.Errorf("expected nil CompressedStatus when no target exists, got %+v", cs)
+	}
+}
+
+func TestProbeCompressedStatusUnfinishedDurationDiff(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	makeFile(t, origPath)
+	makeFile(t, targetPath)
+
+	// Stub probes: durations differ by more than 2 seconds.
+	origDuration := probeDuration
+	origBitrate := probeBitrate
+	t.Cleanup(func() {
+		probeDuration = origDuration
+		probeBitrate = origBitrate
+	})
+	probeDuration = func(path string) (time.Duration, error) {
+		if path == origPath {
+			return 100 * time.Second, nil
+		}
+		return 95 * time.Second, nil // >2s difference
+	}
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if !cs.Unfinished {
+		t.Error("expected Unfinished=true for duration mismatch")
+	}
+}
+
+func TestProbeCompressedStatusComplete(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	// Write different sizes to test ratio calculation.
+	if err := os.WriteFile(origPath, make([]byte, 10000), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, make([]byte, 4200), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDuration := probeDuration
+	origBitrate := probeBitrate
+	t.Cleanup(func() {
+		probeDuration = origDuration
+		probeBitrate = origBitrate
+	})
+	probeDuration = func(path string) (time.Duration, error) {
+		return 60 * time.Second, nil // Same duration for both
+	}
+	probeBitrate = func(path string) (int, error) {
+		if path == origPath {
+			return 5200, nil
+		}
+		return 2184, nil
+	}
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if cs.Unfinished {
+		t.Error("expected Unfinished=false for completed compression")
+	}
+	if cs.CompressedRatio != "42%" {
+		t.Errorf("CompressedRatio = %q, want %q", cs.CompressedRatio, "42%")
+	}
+	if cs.BitrateOrigin != 5200 {
+		t.Errorf("BitrateOrigin = %d, want 5200", cs.BitrateOrigin)
+	}
+	if cs.BitrateTarget != 2184 {
+		t.Errorf("BitrateTarget = %d, want 2184", cs.BitrateTarget)
+	}
+}
+
+func TestProbeCompressedStatusProbeDurationError(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	makeFile(t, origPath)
+	makeFile(t, targetPath)
+
+	origDuration := probeDuration
+	t.Cleanup(func() { probeDuration = origDuration })
+	probeDuration = func(path string) (time.Duration, error) {
+		return 0, fmt.Errorf("ffprobe not found")
+	}
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if !cs.Unfinished {
+		t.Error("expected Unfinished=true when probe fails")
+	}
+}
+
+func TestProbeCompressedStatusTargetDurationError(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	makeFile(t, origPath)
+	makeFile(t, targetPath)
+
+	origDuration := probeDuration
+	t.Cleanup(func() { probeDuration = origDuration })
+	callCount := 0
+	probeDuration = func(path string) (time.Duration, error) {
+		callCount++
+		if callCount == 1 {
+			return 60 * time.Second, nil // original succeeds
+		}
+		return 0, fmt.Errorf("ffprobe failed on target")
+	}
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if !cs.Unfinished {
+		t.Error("expected Unfinished=true when target duration probe fails")
+	}
+}
+
+func TestProbeCompressedStatusOrigBitrateError(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	if err := os.WriteFile(origPath, make([]byte, 10000), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, make([]byte, 4200), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDuration := probeDuration
+	origBitrate := probeBitrate
+	t.Cleanup(func() {
+		probeDuration = origDuration
+		probeBitrate = origBitrate
+	})
+	probeDuration = func(path string) (time.Duration, error) { return 60 * time.Second, nil }
+	probeBitrate = func(path string) (int, error) {
+		return 0, fmt.Errorf("bitrate probe failed")
+	}
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if !cs.Unfinished {
+		t.Error("expected Unfinished=true when orig bitrate probe fails")
+	}
+}
+
+func TestProbeCompressedStatusTargetBitrateError(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	if err := os.WriteFile(origPath, make([]byte, 10000), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, make([]byte, 4200), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDuration := probeDuration
+	origBitrate := probeBitrate
+	t.Cleanup(func() {
+		probeDuration = origDuration
+		probeBitrate = origBitrate
+	})
+	probeDuration = func(path string) (time.Duration, error) { return 60 * time.Second, nil }
+	callCount := 0
+	probeBitrate = func(path string) (int, error) {
+		callCount++
+		if callCount == 1 {
+			return 5200, nil // original succeeds
+		}
+		return 0, fmt.Errorf("target bitrate probe failed")
+	}
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if !cs.Unfinished {
+		t.Error("expected Unfinished=true when target bitrate probe fails")
+	}
+}
+
+func TestInsertFileNodeWithCompressedStatus(t *testing.T) {
+	items := make(map[string]*config.ItemNode)
+	cs := &config.CompressedStatus{CompressedRatio: "50%", BitrateOrigin: 5000, BitrateTarget: 2500}
+	insertFileNode(items, "video.mp4", cs)
+
+	node := items["video.mp4"]
+	if node == nil {
+		t.Fatal("expected node to exist")
+	}
+	if node.CompressedStatus == nil {
+		t.Fatal("expected CompressedStatus to be set")
+	}
+	if node.CompressedStatus.CompressedRatio != "50%" {
+		t.Errorf("CompressedRatio = %q, want %q", node.CompressedStatus.CompressedRatio, "50%")
 	}
 }

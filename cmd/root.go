@@ -12,6 +12,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(newScanCmd())
 	rootCmd.AddCommand(newCompressCmd())
+	rootCmd.AddCommand(newDeleteCmd())
 }
 
 // Execute is the public entry point called by main.
