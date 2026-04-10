@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -42,7 +43,7 @@ func newScanCmd() *cobra.Command {
 			}
 
 			count := countFiles(cfg.Items)
-			fmt.Printf("Found %d video file(s). Config written to %s\n", count, outputPath)
+			slog.Info("Scan complete", "files", count, "configPath", outputPath)
 			return nil
 		},
 	}

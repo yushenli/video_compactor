@@ -2,11 +2,14 @@ package compressor
 
 import (
 	"bytes"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yushenli/video_compactor/internal/config"
+	"github.com/yushenli/video_compactor/internal/logging"
 	"github.com/yushenli/video_compactor/internal/settings"
 )
 
@@ -362,4 +365,73 @@ func TestFprintTaskTableHWHeader(t *testing.T) {
 			t.Error("expected (software) to be absent when VA-API device is set")
 		}
 	})
+}
+
+func TestCompressAllEmptyLogsMessage(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(logging.NewTestLogger(&buf))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	cfg := defaultConfig
+	cfg.Items = map[string]*config.ItemNode{}
+	err := CompressAll(&cfg, "/root", CompressOptions{MaxJobs: 1})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No files to compress") {
+		t.Error("expected log to contain 'No files to compress'")
+	}
+}
+
+func TestCompressAllDryRunLogsProgress(t *testing.T) {
+	var logBuf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(logging.NewTestLogger(&logBuf))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	var ffmpegBuf bytes.Buffer
+	cfg := defaultConfig
+	cfg.Items = map[string]*config.ItemNode{
+		"a.mp4": {Settings: config.Settings{Resolution: "1920x1080"}},
+	}
+	err := CompressAll(&cfg, "/root", CompressOptions{
+		MaxJobs:   1,
+		DryRun:    true,
+		FFmpegOut: &ffmpegBuf,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "Progress") {
+		t.Error("expected log to contain 'Progress'")
+	}
+	if !strings.Contains(out, "Dry-run ffmpeg") {
+		t.Error("expected log to contain 'Dry-run ffmpeg'")
+	}
+}
+
+// TestCompressAllFFmpegError covers the error propagation path when ffmpeg exits
+// non-zero (invalid input file in non-dry-run mode).
+func TestCompressAllFFmpegError(t *testing.T) {
+	dir := t.TempDir()
+	// Write a file with non-video content — ffmpeg will fail to process it.
+	if err := os.WriteFile(filepath.Join(dir, "input.mp4"), []byte("not a video"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Defaults: config.Settings{Codec: "h265", Quality: "normal"},
+		Items:    map[string]*config.ItemNode{"input.mp4": {}},
+	}
+
+	var ffOut bytes.Buffer
+	err := CompressAll(cfg, dir, CompressOptions{
+		MaxJobs:   1,
+		DryRun:    false,
+		FFmpegOut: &ffOut,
+	})
+	if err == nil {
+		t.Error("expected error when ffmpeg fails on invalid input, got nil")
+	}
 }

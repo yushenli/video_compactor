@@ -1,7 +1,9 @@
 package scanner
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yushenli/video_compactor/internal/config"
+	"github.com/yushenli/video_compactor/internal/logging"
 )
 
 func TestIsVideoFile(t *testing.T) {
@@ -315,6 +318,44 @@ func TestProbeCompressedStatusComplete(t *testing.T) {
 	}
 }
 
+func TestProbeCompressedStatusZeroSizeOrigin(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	// Origin is zero bytes; target has content.
+	if err := os.WriteFile(origPath, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, make([]byte, 1000), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDuration := probeDuration
+	origBitrate := probeBitrate
+	t.Cleanup(func() {
+		probeDuration = origDuration
+		probeBitrate = origBitrate
+	})
+	probeDuration = func(path string) (time.Duration, error) {
+		return 60 * time.Second, nil
+	}
+	probeBitrate = func(path string) (int, error) {
+		return 1000, nil
+	}
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if cs.Unfinished {
+		t.Error("expected Unfinished=false")
+	}
+	// ratio defaults to 100.0 when origin size is zero → "100%"
+	if cs.CompressedRatio != "100%" {
+		t.Errorf("CompressedRatio = %q, want %q", cs.CompressedRatio, "100%")
+	}
+}
+
 func TestProbeCompressedStatusProbeDurationError(t *testing.T) {
 	dir := t.TempDir()
 	origPath := filepath.Join(dir, "video.mp4")
@@ -445,5 +486,216 @@ func TestInsertFileNodeWithCompressedStatus(t *testing.T) {
 	}
 	if node.CompressedStatus.CompressedRatio != "50%" {
 		t.Errorf("CompressedRatio = %q, want %q", node.CompressedStatus.CompressedRatio, "50%")
+	}
+}
+
+func TestProbeCompressedStatusProbeDurationErrorLogsWarning(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	makeFile(t, origPath)
+	makeFile(t, targetPath)
+
+	origDuration := probeDuration
+	t.Cleanup(func() { probeDuration = origDuration })
+	probeDuration = func(path string) (time.Duration, error) {
+		return 0, fmt.Errorf("ffprobe not found")
+	}
+
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(logging.NewTestLogger(&buf))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if !cs.Unfinished {
+		t.Error("expected Unfinished=true when probe fails")
+	}
+	if !strings.Contains(buf.String(), "Could not probe duration") {
+		t.Errorf("expected log to contain %q, got %q", "Could not probe duration", buf.String())
+	}
+	if !strings.Contains(buf.String(), origPath) {
+		t.Errorf("expected log to reference original file %q, got %q", origPath, buf.String())
+	}
+}
+
+func TestProbeCompressedStatusTargetDurationErrorLogsWarning(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	makeFile(t, origPath)
+	makeFile(t, targetPath)
+
+	origDuration := probeDuration
+	t.Cleanup(func() { probeDuration = origDuration })
+	callCount := 0
+	probeDuration = func(path string) (time.Duration, error) {
+		callCount++
+		if callCount == 1 {
+			return 60 * time.Second, nil
+		}
+		return 0, fmt.Errorf("ffprobe failed on target")
+	}
+
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(logging.NewTestLogger(&buf))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if !cs.Unfinished {
+		t.Error("expected Unfinished=true when target duration probe fails")
+	}
+	if !strings.Contains(buf.String(), "Could not probe duration") {
+		t.Errorf("expected log to contain %q, got %q", "Could not probe duration", buf.String())
+	}
+	if !strings.Contains(buf.String(), targetPath) {
+		t.Errorf("expected log to reference target file %q, got %q", targetPath, buf.String())
+	}
+}
+
+func TestProbeCompressedStatusOrigBitrateErrorLogsWarning(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	if err := os.WriteFile(origPath, make([]byte, 10000), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, make([]byte, 4200), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDuration := probeDuration
+	origBitrate := probeBitrate
+	t.Cleanup(func() {
+		probeDuration = origDuration
+		probeBitrate = origBitrate
+	})
+	probeDuration = func(path string) (time.Duration, error) { return 60 * time.Second, nil }
+	probeBitrate = func(path string) (int, error) {
+		return 0, fmt.Errorf("bitrate probe failed")
+	}
+
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(logging.NewTestLogger(&buf))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if !cs.Unfinished {
+		t.Error("expected Unfinished=true when orig bitrate probe fails")
+	}
+	if !strings.Contains(buf.String(), "Could not probe bitrate") {
+		t.Errorf("expected log to contain %q, got %q", "Could not probe bitrate", buf.String())
+	}
+}
+
+// TestProbeCompressedStatusTargetLongerThanOriginal exercises the `diff = -diff`
+// branch when the target file is reported as slightly longer than the original.
+// With a sub-2s difference the probe proceeds through to bitrate comparison.
+func TestProbeCompressedStatusTargetLongerThanOriginal(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	if err := os.WriteFile(origPath, make([]byte, 10000), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, make([]byte, 4200), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDurationFn := probeDuration
+	origBitrateFn := probeBitrate
+	t.Cleanup(func() {
+		probeDuration = origDurationFn
+		probeBitrate = origBitrateFn
+	})
+	// Target duration is 1 second longer than original → diff = -1s, abs = 1s < 2s threshold.
+	probeDuration = func(path string) (time.Duration, error) {
+		if path == origPath {
+			return 60 * time.Second, nil
+		}
+		return 61 * time.Second, nil
+	}
+	probeBitrate = func(path string) (int, error) {
+		if path == origPath {
+			return 5200, nil
+		}
+		return 2184, nil
+	}
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if cs.Unfinished {
+		t.Error("expected Unfinished=false for 1s duration difference (within threshold)")
+	}
+}
+
+// TestProbeCompressedStatusOrigStatError covers the os.Stat(originalPath) error path
+// by deleting the original file during the second probeDuration call.
+func TestProbeCompressedStatusOrigStatError(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	makeFile(t, origPath)
+	makeFile(t, targetPath)
+
+	origDurationFn := probeDuration
+	t.Cleanup(func() { probeDuration = origDurationFn })
+	callCount := 0
+	probeDuration = func(path string) (time.Duration, error) {
+		callCount++
+		if callCount == 2 {
+			// Delete the original just before os.Stat(originalPath) is called.
+			os.Remove(origPath)
+		}
+		return 60 * time.Second, nil
+	}
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if !cs.Unfinished {
+		t.Error("expected Unfinished=true when original file stat fails")
+	}
+}
+
+// TestProbeCompressedStatusTargetStatError covers the os.Stat(targetPath) error path
+// by deleting the target file during its duration probe (before the stat is called).
+func TestProbeCompressedStatusTargetStatError(t *testing.T) {
+	dir := t.TempDir()
+	origPath := filepath.Join(dir, "video.mp4")
+	targetPath := filepath.Join(dir, "video.compressed.mp4")
+	makeFile(t, origPath)
+	makeFile(t, targetPath)
+
+	origDurationFn := probeDuration
+	t.Cleanup(func() { probeDuration = origDurationFn })
+	// Delete targetPath when its duration is probed so the subsequent os.Stat(targetPath) fails.
+	probeDuration = func(path string) (time.Duration, error) {
+		if path == targetPath {
+			os.Remove(targetPath)
+		}
+		return 60 * time.Second, nil
+	}
+
+	cs := probeCompressedStatus(origPath)
+	if cs == nil {
+		t.Fatal("expected non-nil CompressedStatus")
+	}
+	if !cs.Unfinished {
+		t.Error("expected Unfinished=true when target file stat fails")
 	}
 }

@@ -3,6 +3,8 @@ package compressor
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -39,9 +41,9 @@ func BuildFFmpegArgs(inputPath, outputPath string, s settings.ResolvedSettings, 
 		if settings.IsNamedResolution(s.Resolution) {
 			var err error
 			srcW, srcH, err = probeVideoDimensions(inputPath)
-			// Log a warning to STDERR if we can't probe dimensions, since named resolution scaling may not work well without knowing orientation
 			if err != nil || srcW == 0 || srcH == 0 {
-				fmt.Fprintf(os.Stderr, "[warning] unable to probe video dimensions for %s, result: %dx%d, error: %v. Named resolution scaling may not work as expected\n", inputPath, srcW, srcH, err)
+				slog.Warn("Unable to probe video dimensions; named resolution scaling may not work as expected",
+					"file", inputPath, "width", srcW, "height", srcH, "error", err)
 			}
 		}
 		scaleArg, err := buildScaleFilter(s.Resolution, srcW, srcH)
@@ -104,12 +106,14 @@ func buildVAAPIArgs(inputPath, outputPath string, s settings.ResolvedSettings, v
 		var err error
 		srcW, srcH, err = probeVideoDimensions(inputPath)
 		if err != nil || srcW == 0 || srcH == 0 {
-			fmt.Fprintf(os.Stderr, "[warning] unable to probe video dimensions for %s, result: %dx%d, error: %v. Named resolution scaling may not work as expected\n", inputPath, srcW, srcH, err)
+			slog.Warn("Unable to probe video dimensions; named resolution scaling may not work as expected",
+				"file", inputPath, "width", srcW, "height", srcH, "error", err)
 		}
 	}
 	vf, err := buildVAAPIFilterChain(s.Resolution, srcW, srcH)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warning] invalid resolution %q for %s: %v — scaling skipped\n", s.Resolution, inputPath, err)
+		slog.Warn("Invalid resolution — scaling skipped",
+			"resolution", s.Resolution, "file", inputPath, "error", err)
 		vf = "format=nv12|vaapi,hwupload"
 	}
 	args = append(args, "-vf", vf)
@@ -121,7 +125,7 @@ func buildVAAPIArgs(inputPath, outputPath string, s settings.ResolvedSettings, v
 
 	// Lossless (CRF 0) is not supported by VA-API encoders.
 	if s.CRF == 0 {
-		fmt.Fprintf(os.Stderr, "[warning] lossless encoding (CRF 0) is not supported with VA-API — encoding at QP 0 (near-lossless)\n")
+		slog.Warn("Lossless encoding (CRF 0) is not supported with VA-API — encoding at QP 0 (near-lossless)")
 	}
 
 	args = append(args,
@@ -218,17 +222,22 @@ func parseProbeOutput(data []byte) (int, int, error) {
 }
 
 // ExecuteFFmpeg runs ffmpeg with the given arguments.
-// When dryRun is true it only prints the command without executing.
-func ExecuteFFmpeg(args []string, dryRun bool) error {
+// When dryRun is true it only logs the command without executing.
+// ffmpegOut receives the process stdout/stderr; pass nil to discard.
+func ExecuteFFmpeg(args []string, dryRun bool, ffmpegOut io.Writer) error {
+	if ffmpegOut == nil {
+		ffmpegOut = io.Discard
+	}
+
 	if dryRun {
-		fmt.Printf("[dry-run] ffmpeg %s\n", strings.Join(args, " "))
+		slog.Info("Dry-run ffmpeg", "command", "ffmpeg "+strings.Join(args, " "))
 		return nil
 	}
 
-	fmt.Printf("Running ffmpeg %s\n", strings.Join(args, " "))
+	slog.Info("Running ffmpeg", "command", "ffmpeg "+strings.Join(args, " "))
 	cmd := exec.Command("ffmpeg", append([]string{"-y", "-loglevel", "warning"}, args...)...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = ffmpegOut
+	cmd.Stderr = ffmpegOut
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ffmpeg failed: %w", err)
 	}

@@ -3,6 +3,7 @@ package compressor
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,7 +27,15 @@ type CompressTask struct {
 type CompressOptions struct {
 	MaxJobs     int
 	DryRun      bool
-	VAAPIDevice string // empty = software encoding; non-empty = VA-API device path (e.g. /dev/dri/renderD128)
+	VAAPIDevice string    // empty = software encoding; non-empty = VA-API device path (e.g. /dev/dri/renderD128)
+	FFmpegOut   io.Writer // destination for ffmpeg process stdout/stderr (nil = os.Stderr)
+}
+
+func (o CompressOptions) ffmpegOut() io.Writer {
+	if o.FFmpegOut != nil {
+		return o.FFmpegOut
+	}
+	return os.Stderr
 }
 
 // CompressAll builds the task list from cfg and executes them with opts.MaxJobs parallelism.
@@ -36,7 +45,7 @@ func CompressAll(cfg *config.Config, rootDir string, opts CompressOptions) error
 		return err
 	}
 	if len(tasks) == 0 {
-		fmt.Println("No files to compress.")
+		slog.Info("No files to compress.")
 		return nil
 	}
 
@@ -55,6 +64,8 @@ func CompressAll(cfg *config.Config, rootDir string, opts CompressOptions) error
 	var firstErr error
 	var mu sync.Mutex
 
+	ffOut := opts.ffmpegOut()
+
 	for _, task := range tasks {
 		wg.Add(1)
 		sem <- struct{}{}
@@ -62,7 +73,7 @@ func CompressAll(cfg *config.Config, rootDir string, opts CompressOptions) error
 			defer wg.Done()
 			defer func() { <-sem }()
 			args := BuildFFmpegArgs(t.InputPath, t.OutputPath, t.Settings, opts.VAAPIDevice)
-			if err := ExecuteFFmpeg(args, opts.DryRun); err != nil {
+			if err := ExecuteFFmpeg(args, opts.DryRun, ffOut); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -72,11 +83,11 @@ func CompressAll(cfg *config.Config, rootDir string, opts CompressOptions) error
 			}
 			if !opts.DryRun {
 				if tsErr := CopyFileTimestamp(t.InputPath, t.OutputPath); tsErr != nil {
-					fmt.Fprintf(os.Stderr, "[warning] could not copy timestamp for %s: %v\n", t.OutputPath, tsErr)
+					slog.Warn("Could not copy timestamp", "output", t.OutputPath, "error", tsErr)
 				}
 			}
 			n := atomic.AddInt64(&completed, 1)
-			fmt.Printf("[progress] %d out of %d videos compressed\n", n, total)
+			slog.Info("Progress", "completed", n, "total", total)
 		}(task)
 	}
 

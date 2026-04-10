@@ -155,3 +155,35 @@ func TestParseBitrate(t *testing.T) {
 		})
 	}
 }
+
+func TestParseBitrateNonNumericFormatSize(t *testing.T) {
+	// Covers the "parse format size" error branch (no streams, non-numeric size).
+	_, err := parseBitrate([]byte(`{"streams":[],"format":{"size":"abc","duration":"10.0"}}`))
+	if err == nil {
+		t.Error("expected error for non-numeric format size, got nil")
+	}
+}
+
+func TestParseBitrateNonNumericFormatDuration(t *testing.T) {
+	// Covers the "parse format duration" error branch (no streams, non-numeric duration).
+	_, err := parseBitrate([]byte(`{"streams":[],"format":{"size":"1000000","duration":"abc"}}`))
+	if err == nil {
+		t.Error("expected error for non-numeric format duration, got nil")
+	}
+}
+
+func TestVideoDurationErrorOnNonexistentFile(t *testing.T) {
+	// Exercises the ffprobe exec error path.
+	_, err := VideoDuration("/nonexistent_xyz_video_file.mp4")
+	if err == nil {
+		t.Error("expected error for nonexistent file, got nil")
+	}
+}
+
+func TestVideoStreamBitrateErrorOnNonexistentFile(t *testing.T) {
+	// Exercises the ffprobe exec error path.
+	_, err := VideoStreamBitrate("/nonexistent_xyz_video_file.mp4")
+	if err == nil {
+		t.Error("expected error for nonexistent file, got nil")
+	}
+}

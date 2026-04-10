@@ -1,10 +1,14 @@
 package compressor
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/yushenli/video_compactor/internal/logging"
 	"github.com/yushenli/video_compactor/internal/settings"
 )
 
@@ -547,15 +551,93 @@ func TestExecuteFFmpegNonDryRun(t *testing.T) {
 	// Verify the non-dry-run path: ffmpeg is invoked for real.
 	// Using "-version" causes ffmpeg to print its version and exit 0 immediately.
 	t.Run("succeeds_with_version_flag", func(t *testing.T) {
-		if err := ExecuteFFmpeg([]string{"-version"}, false); err != nil {
+		if err := ExecuteFFmpeg([]string{"-version"}, false, nil); err != nil {
 			t.Errorf("expected no error running ffmpeg -version, got: %v", err)
 		}
 	})
 
 	// Verify the error path: ffmpeg exits non-zero and the error is propagated.
 	t.Run("returns_error_on_ffmpeg_failure", func(t *testing.T) {
-		if err := ExecuteFFmpeg([]string{"-i", "nonexistent_input_file_that_does_not_exist.mp4"}, false); err == nil {
+		if err := ExecuteFFmpeg([]string{"-i", "nonexistent_input_file_that_does_not_exist.mp4"}, false, nil); err == nil {
 			t.Error("expected error when ffmpeg fails, got nil")
 		}
 	})
+}
+
+func TestExecuteFFmpegDryRunLogsCommand(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(logging.NewTestLogger(&buf))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	err := ExecuteFFmpeg([]string{"-i", "in.mp4", "out.mp4"}, true, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Dry-run ffmpeg") {
+		t.Error("expected log to contain 'Dry-run ffmpeg'")
+	}
+	if !strings.Contains(buf.String(), "ffmpeg -i in.mp4 out.mp4") {
+		t.Error("expected log to contain the ffmpeg command")
+	}
+}
+
+func TestExecuteFFmpegNonDryRunLogsCommand(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(logging.NewTestLogger(&buf))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	err := ExecuteFFmpeg([]string{"-version"}, false, nil)
+	if err != nil {
+		t.Fatalf("unexpected error running ffmpeg -version: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Running ffmpeg") {
+		t.Error("expected log to contain 'Running ffmpeg'")
+	}
+}
+
+func TestBuildFFmpegArgsNamedResolutionProbeFailureLogsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(logging.NewTestLogger(&buf))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	s := settings.ResolvedSettings{CRF: 28, Codec: "h265", Resolution: "1080p"}
+	args := BuildFFmpegArgs("/nonexistent/fake_probe_test.mp4", "out.mp4", s, "")
+	if !strings.Contains(buf.String(), "Unable to probe video dimensions") {
+		t.Error("expected warning about probe failure")
+	}
+	if !argsContainSeq(args, "-vf", "scale=-2:1080") {
+		t.Errorf("expected landscape fallback scale, got %v", args)
+	}
+}
+
+func TestBuildVAAPIArgsLosslessCRF0LogsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(logging.NewTestLogger(&buf))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	s := settings.ResolvedSettings{CRF: 0, Codec: "h265"}
+	BuildFFmpegArgs("in.mp4", "out.mp4", s, "/dev/dri/renderD128")
+	if !strings.Contains(buf.String(), "Lossless encoding (CRF 0) is not supported with VA-API") {
+		t.Error("expected warning about lossless not being supported with VA-API")
+	}
+}
+
+func TestBuildVAAPIArgsInvalidResolutionLogsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(logging.NewTestLogger(&buf))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	s := settings.ResolvedSettings{CRF: 28, Codec: "h265", Resolution: "fullhd"}
+	args := BuildFFmpegArgs("in.mp4", "out.mp4", s, "/dev/dri/renderD128")
+	if !strings.Contains(buf.String(), "Invalid resolution") {
+		t.Error("expected warning about invalid resolution")
+	}
+	if !argsContainSeq(args, "-vf", "format=nv12|vaapi,hwupload") {
+		t.Errorf("expected bare upload fallback, got %v", args)
+	}
 }

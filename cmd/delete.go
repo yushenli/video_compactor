@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -37,9 +38,7 @@ without actually removing them. Pass --dryrun=false to perform the deletion.`,
 			}
 
 			if dryRun {
-				fmt.Println("Running in dry-run mode. No files will be deleted.")
-				fmt.Println("Pass --dryrun=false to actually delete files.")
-				fmt.Println()
+				slog.Info("Running in dry-run mode. No files will be deleted. Pass --dryrun=false to actually delete files.")
 			}
 
 			return deleter.DeleteOriginals(cfg, dir, dryRun)

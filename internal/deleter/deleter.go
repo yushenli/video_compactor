@@ -2,6 +2,7 @@ package deleter
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,7 +26,7 @@ func DeleteOriginals(cfg *config.Config, rootDir string, dryRun bool) error {
 	collectDeletable(cfg.Items, rootDir, &candidates)
 
 	if len(candidates) == 0 {
-		fmt.Println("No files eligible for deletion.")
+		slog.Info("No files eligible for deletion.")
 		return nil
 	}
 
@@ -34,23 +35,28 @@ func DeleteOriginals(cfg *config.Config, rootDir string, dryRun bool) error {
 
 	for _, candidate := range candidates {
 		if dryRun {
-			fmt.Printf("[dry-run] %s  (%s)\n", candidate.Path, FormatSize(candidate.Size))
+			slog.Info("Dry-run: would delete",
+				"path", candidate.Path, "size", FormatSize(candidate.Size))
 			totalSize += candidate.Size
 		} else {
 			if err := os.Remove(candidate.Path); err != nil {
-				fmt.Fprintf(os.Stderr, "[error] failed to delete %s: %v\n", candidate.Path, err)
+				slog.Error("Failed to delete file",
+					"path", candidate.Path, "error", err)
 				failures = append(failures, candidate.Path)
 			} else {
 				totalSize += candidate.Size
-				fmt.Printf("Deleted %s  (%s)\n", candidate.Path, FormatSize(candidate.Size))
+				slog.Info("Deleted file",
+					"path", candidate.Path, "size", FormatSize(candidate.Size))
 			}
 		}
 	}
 
 	if dryRun {
-		fmt.Printf("\nTotal: %d file(s), %s\n", len(candidates), FormatSize(totalSize))
+		slog.Info("Dry-run summary",
+			"files", len(candidates), "totalSize", FormatSize(totalSize))
 	} else {
-		fmt.Printf("\nDeleted %d file(s), freed %s\n", len(candidates)-len(failures), FormatSize(totalSize))
+		slog.Info("Deletion summary",
+			"deleted", len(candidates)-len(failures), "failed", len(failures), "freed", FormatSize(totalSize))
 	}
 
 	if len(failures) > 0 {
@@ -77,7 +83,8 @@ func collectDeletable(items map[string]*config.ItemNode, absDir string, candidat
 		} else if node.CompressedStatus != nil && !node.CompressedStatus.Unfinished {
 			info, err := os.Stat(absPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[warning] could not stat %s: %v — skipping\n", absPath, err)
+				slog.Warn("Could not stat file — skipping",
+					"path", absPath, "error", err)
 				continue
 			}
 			*candidates = append(*candidates, deleteCandidate{

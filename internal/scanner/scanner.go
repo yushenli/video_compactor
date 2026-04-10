@@ -3,6 +3,7 @@ package scanner
 import (
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -89,15 +90,16 @@ func probeCompressedStatus(originalPath string) *config.CompressedStatus {
 	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
 		return nil
 	}
+	slog.Info("Probing potentially compressed video", "originalPath", originalPath, "targetPath", targetPath)
 
 	origDuration, err := probeDuration(originalPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warning] could not probe duration for %s: %v — marking as unfinished\n", originalPath, err)
+		slog.Warn("Could not probe duration — marking as unfinished", "file", originalPath, "error", err)
 		return &config.CompressedStatus{Unfinished: true}
 	}
 	targetDuration, err := probeDuration(targetPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warning] could not probe duration for %s: %v — marking as unfinished\n", targetPath, err)
+		slog.Warn("Could not probe duration — marking as unfinished", "file", targetPath, "error", err)
 		return &config.CompressedStatus{Unfinished: true}
 	}
 
@@ -111,27 +113,30 @@ func probeCompressedStatus(originalPath string) *config.CompressedStatus {
 
 	origInfo, err := os.Stat(originalPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warning] could not stat %s: %v — marking as unfinished\n", originalPath, err)
+		slog.Warn("Could not stat file — marking as unfinished", "file", originalPath, "error", err)
 		return &config.CompressedStatus{Unfinished: true}
 	}
 	targetInfo, err := os.Stat(targetPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warning] could not stat %s: %v — marking as unfinished\n", targetPath, err)
+		slog.Warn("Could not stat file — marking as unfinished", "file", targetPath, "error", err)
 		return &config.CompressedStatus{Unfinished: true}
 	}
 
 	origBitrate, err := probeBitrate(originalPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warning] could not probe bitrate for %s: %v — marking as unfinished\n", originalPath, err)
+		slog.Warn("Could not probe bitrate — marking as unfinished", "file", originalPath, "error", err)
 		return &config.CompressedStatus{Unfinished: true}
 	}
 	targetBitrate, err := probeBitrate(targetPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warning] could not probe bitrate for %s: %v — marking as unfinished\n", targetPath, err)
+		slog.Warn("Could not probe bitrate — marking as unfinished", "file", targetPath, "error", err)
 		return &config.CompressedStatus{Unfinished: true}
 	}
 
-	ratio := float64(targetInfo.Size()) / float64(origInfo.Size()) * 100
+	ratio := 100.0
+	if origInfo.Size() > 0 {
+		ratio = float64(targetInfo.Size()) / float64(origInfo.Size()) * 100
+	}
 	ratioStr := fmt.Sprintf("%d%%", int(math.Round(ratio)))
 
 	return &config.CompressedStatus{
