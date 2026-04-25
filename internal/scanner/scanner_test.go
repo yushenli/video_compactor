@@ -672,6 +672,323 @@ func TestProbeCompressedStatusOrigStatError(t *testing.T) {
 	}
 }
 
+func TestExtractPrefixPattern(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		pattern  string
+		expected string
+	}{
+		// Basic / no anchor
+		{"empty_string", "", ""},
+		{"anchor_only", "^", ""},
+		{"all_literal", "^2026", "2026"},
+		{"all_literal_alpha", "^abc", "abc"},
+		{"spaces_literal", "^hello world", "hello world"},
+		{"slashes_literal", "^2026/January/", "2026/January/"},
+		{"char_class", `^202[456]`, "202[456]"},
+		{"char_class_with_dotstar", `^202[456].*`, "202[456]"},
+		{"multi_segment", "^before2010/200", "before2010/200"},
+		{"no_anchor_word", "comedy", ""},
+		{"no_anchor_escape", `\.mp4$`, ""},
+		{"immediate_dotstar", "^.*", ""},
+		{"immediate_dollar", "^$", ""},
+		{"immediate_paren", `^(comedy\|drama)`, ""},
+		{"unescaped_dot", "^abc.def", "abc"},
+
+		// Backslash-escaped punctuation
+		{"escaped_dot", `^2026\.01`, `2026\.01`},
+		{"escaped_slash", `^foo\/bar`, `foo\/bar`},
+		{"escaped_backslash", `^2026\\backup`, `2026\\backup`},
+		{"escaped_bracket", `^foo\[bar`, `foo\[bar`},
+		{"escaped_paren", `^foo\(bar`, `foo\(bar`},
+		{"escaped_star", `^foo\*bar`, `foo\*bar`},
+		{"escaped_plus", `^foo\+bar`, `foo\+bar`},
+		{"escaped_question", `^foo\?bar`, `foo\?bar`},
+		{"escaped_pipe", `^a\|b`, `a\|b`},
+
+		// Regex shorthands (stop)
+		{"shorthand_digit", `^\d+`, ""},
+		{"partial_then_shorthand", `^test\d+`, "test"},
+		{"shorthand_word", `^\w+_test`, ""},
+		{"shorthand_space", `^log\s`, "log"},
+		{"shorthand_boundary", `^foo\bbar`, "foo"},
+
+		// Quantifiers (drop last token)
+		{"star_quantifier", "^abc*", "ab"},
+		{"plus_quantifier", "^abc+", "ab"},
+		{"question_quantifier", "^abc?", "ab"},
+		{"brace_quantifier", "^abc{2,5}", "ab"},
+		{"star_all_gone", "^a*", ""},
+		{"plus_all_gone", "^a+", ""},
+		{"question_first_char", "^a?b", ""},
+
+		// Mixed escape + quantifier
+		{"escaped_dot_star", `^ab\.*`, "ab"},
+		{"escaped_dot_plus", `^ab\.+`, "ab"},
+		{"both_escaped_noq", `^ab\.\*`, `ab\.\*`},
+		{"escaped_bslash_plus", `^a\\+`, "a"},
+
+		// Edge cases
+		{"double_anchor", "^^abc", ""},
+		{"hyphens_literal", "^2026-04-11", "2026-04-11"},
+		{"underscores_literal", "^file_name", "file_name"},
+		{"uppercase", "^UPPER", "UPPER"},
+		{"mixed_case_digits", "^MiXeD123", "MiXeD123"},
+		{"deep_path", "^path/to/dir", "path/to/dir"},
+		{"single_char", "^a", "a"},
+		{"many_segments", "^a/b/c/d/e", "a/b/c/d/e"},
+
+		// Character class handling
+		{"class_in_middle", "^foo[abc]bar", "foo[abc]bar"},
+		{"class_at_start", "^[abc]def", "[abc]def"},
+		{"negated_class", "^foo[^abc]bar", "foo[^abc]bar"},
+		{"range_in_class", "^foo[a-z]bar", "foo[a-z]bar"},
+		{"escaped_bracket_in_class", `^foo[\]]bar`, `foo[\]]bar`},
+		{"class_star", "^foo[abc]*", "foo"},
+		{"class_plus", "^foo[abc]+", "foo"},
+		{"class_question", "^foo[abc]?", "foo"},
+		{"class_brace", "^foo[abc]{2}", "foo"},
+		{"class_only_star", "^[abc]*", ""},
+		{"class_stays_lit_drops", "^[abc]x*", "[abc]"},
+		{"class_slash_lit", "^201[456]/Jan", "201[456]/Jan"},
+		{"class_start_path", "^[a-z]2026/foo", "[a-z]2026/foo"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractPrefixPattern(tc.pattern)
+			if got != tc.expected {
+				t.Errorf("extractPrefixPattern(%q) = %q, want %q", tc.pattern, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestSplitPrefixAtSlashes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		pattern  string
+		expected []string
+	}{
+		{"no_slash", "2026", nil},
+		{"one_slash", "2026/Jan", []string{"2026"}},
+		{"two_slashes", "a/b/c", []string{"a", "a/b"}},
+		{"class_then_slash", "201[456]/Jan", []string{"201[456]"}},
+		{"class_both_sides", "a[bc]/d[ef]/ghi", []string{"a[bc]", "a[bc]/d[ef]"}},
+		{"trailing_slash", "2026/", []string{"2026"}},
+		{"escaped_slash", `foo\/bar`, nil},
+		{"class_with_slash_inside", "foo[/]bar", nil}, // '/' inside [...] is not a boundary
+		{"three_levels", "x/y/z/w", []string{"x", "x/y", "x/y/z"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := splitPrefixAtSlashes(tc.pattern)
+			if len(got) != len(tc.expected) {
+				t.Fatalf("splitPrefixAtSlashes(%q) returned %d segments, want %d: %v", tc.pattern, len(got), len(tc.expected), got)
+			}
+			for i := range got {
+				if got[i] != tc.expected[i] {
+					t.Errorf("segment[%d] = %q, want %q", i, got[i], tc.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestScanDirectoryPruning(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		files             []string
+		filter            string
+		presentPaths      []string
+		absentPaths       []string
+		// neverVisitedFiles lists files inside directories that must have been pruned —
+		// the WalkDir callback must never have been invoked for these paths. An absent
+		// result alone does not prove pruning (the filter regex could have excluded them
+		// after the walk); this field verifies the directory was never entered at all.
+		neverVisitedFiles []string
+	}{
+		{
+			name:              "prefix_2026_skips_other_years",
+			files:             []string{"2024/a.mp4", "2025/b.mp4", "2026/c.mp4"},
+			filter:            `^2026`,
+			presentPaths:      []string{"2026/c.mp4"},
+			absentPaths:       []string{"2024", "2025"},
+			neverVisitedFiles: []string{"2024/a.mp4", "2025/b.mp4"},
+		},
+		{
+			name:              "multi_segment_prefix",
+			files:             []string{"after2010/a.mp4", "before2010/2001/b.mp4", "before2010/300/c.mp4"},
+			filter:            `^before2010/200`,
+			presentPaths:      []string{"before2010/2001/b.mp4"},
+			absentPaths:       []string{"after2010", "before2010/300"},
+			neverVisitedFiles: []string{"after2010/a.mp4", "before2010/300/c.mp4"},
+		},
+		{
+			name:              "char_class_prune",
+			files:             []string{"2019/a.mp4", "2020/b.mp4", "2024/c.mp4", "2026/d.mp4", "2030/e.mp4"},
+			filter:            `^202[456]`,
+			presentPaths:      []string{"2024/c.mp4", "2026/d.mp4"},
+			absentPaths:       []string{"2019", "2020", "2030"},
+			neverVisitedFiles: []string{"2019/a.mp4", "2020/b.mp4", "2030/e.mp4"},
+		},
+		{
+			name:         "no_filter_walks_all",
+			files:        []string{"2024/a.mp4", "2025/b.mp4", "2026/c.mp4"},
+			filter:       "",
+			presentPaths: []string{"2024/a.mp4", "2025/b.mp4", "2026/c.mp4"},
+		},
+		{
+			// Without an anchored prefix, no pruning occurs — drama is walked but
+			// its files are excluded by the filter regex after the fact.
+			name:              "unanchored_filter_no_prune",
+			files:             []string{"comedy/a.mp4", "drama/b.mp4"},
+			filter:            `comedy`,
+			presentPaths:      []string{"comedy/a.mp4"},
+			absentPaths:       []string{"drama"},
+			neverVisitedFiles: nil, // drama/b.mp4 IS visited; it's just filtered by regex
+		},
+		{
+			name:              "prefix_with_slash_prune",
+			files:             []string{"2026/January/a.mp4", "2026/February/b.mp4", "2025/January/c.mp4"},
+			filter:            `^2026/Jan`,
+			presentPaths:      []string{"2026/January/a.mp4"},
+			absentPaths:       []string{"2026/February", "2025"},
+			neverVisitedFiles: []string{"2025/January/c.mp4", "2026/February/b.mp4"},
+		},
+		{
+			name:              "escaped_dot_prefix",
+			files:             []string{"2026.01/a.mp4", "2026.02/b.mp4", "2026X01/c.mp4"},
+			filter:            `^2026\.01`,
+			presentPaths:      []string{"2026.01/a.mp4"},
+			absentPaths:       []string{"2026.02", "2026X01"},
+			neverVisitedFiles: []string{"2026.02/b.mp4", "2026X01/c.mp4"},
+		},
+		{
+			name:              "root_level_files_with_prefix",
+			files:             []string{"2026_clip.mp4", "subdir/2026_clip.mp4"},
+			filter:            `^2026`,
+			presentPaths:      []string{"2026_clip.mp4"},
+			absentPaths:       []string{"subdir"},
+			neverVisitedFiles: []string{"subdir/2026_clip.mp4"},
+		},
+		{
+			// ^(2024|2026) has no extractable prefix (starts with '('), so no pruning.
+			// 2025 is absent from results but was still walked into.
+			name:              "alternation_no_prune",
+			files:             []string{"2024/a.mp4", "2025/b.mp4", "2026/c.mp4"},
+			filter:            `^(2024|2026)`,
+			presentPaths:      []string{"2024/a.mp4", "2026/c.mp4"},
+			absentPaths:       []string{"2025"},
+			neverVisitedFiles: nil, // 2025/b.mp4 IS visited, just filtered after the fact
+		},
+		{
+			name:              "longer_prefix_skips_shorter_dir",
+			files:             []string{"2026/a.mp4", "20260101/b.mp4"},
+			filter:            `^20260101`,
+			presentPaths:      []string{"20260101/b.mp4"},
+			absentPaths:       []string{"2026"},
+			neverVisitedFiles: []string{"2026/a.mp4"},
+		},
+		{
+			// Prefix is shorter than the directory names at the first level.
+			// ^202[56] matches dirs whose names START with 2025 or 2026 (e.g. 20250102,
+			// 20260304), so those must be walked into. 20240506 doesn't start with
+			// 202 followed by 5 or 6, so it must be pruned entirely.
+			name:              "shorter_prefix_walks_into_longer_dirs",
+			files:             []string{"20240506/a.mp4", "20250102/b.mp4", "20260304/c.mp4"},
+			filter:            `^202[56]`,
+			presentPaths:      []string{"20250102/b.mp4", "20260304/c.mp4"},
+			absentPaths:       []string{"20240506"},
+			neverVisitedFiles: []string{"20240506/a.mp4"},
+		},
+		{
+			// 2013 and 2020 are pruned outright. 2014 is an ancestor (walked into)
+			// but 2014/Feb is pruned inside it.
+			name:              "char_class_ancestor_prune",
+			files:             []string{"2013/Jan/a.mp4", "2014/Jan/b.mp4", "2014/Feb/c.mp4", "2020/Jan/d.mp4"},
+			filter:            `^201[456]/Jan`,
+			presentPaths:      []string{"2014/Jan/b.mp4"},
+			absentPaths:       []string{"2013", "2014/Feb", "2020"},
+			neverVisitedFiles: []string{"2013/Jan/a.mp4", "2014/Feb/c.mp4", "2020/Jan/d.mp4"},
+		},
+		{
+			// 3-level prefix produces 2 ancestor regex segments: "^a[12]/$" and "^a[12]/d1/$".
+			// b1 and a1/d2 and a1/d1/g2 are pruned at different levels.
+			name: "three_level_ancestor_prune",
+			files: []string{
+				"a1/d1/g1/clip.mp4",
+				"a1/d1/g2/clip.mp4",
+				"a1/d2/g1/clip.mp4",
+				"a2/d1/g1/clip.mp4",
+				"b1/d1/g1/clip.mp4",
+			},
+			filter:            `^a[12]/d1/g1`,
+			presentPaths:      []string{"a1/d1/g1/clip.mp4", "a2/d1/g1/clip.mp4"},
+			absentPaths:       []string{"a1/d1/g2", "a1/d2", "b1"},
+			neverVisitedFiles: []string{"a1/d1/g2/clip.mp4", "a1/d2/g1/clip.mp4", "b1/d1/g1/clip.mp4"},
+		},
+		{
+			// 3-level prefix with char classes on all levels. xa/yb/zd is pruned inside
+			// an otherwise-entered subtree.
+			name: "deep_multi_level_with_classes",
+			files: []string{
+				"xa/yb/zc/clip.mp4",
+				"xa/yb/zd/clip.mp4",
+				"xa/yc/zc/clip.mp4",
+				"xb/yb/zc/clip.mp4",
+			},
+			filter:            `^x[ab]/y[bc]/zc`,
+			presentPaths:      []string{"xa/yb/zc/clip.mp4", "xa/yc/zc/clip.mp4", "xb/yb/zc/clip.mp4"},
+			absentPaths:       []string{"xa/yb/zd"},
+			neverVisitedFiles: []string{"xa/yb/zd/clip.mp4"},
+		},
+	}
+	for _, tc := range tests {
+		// Sub-tests are sequential (not parallel) so they can safely share walkDirEntryHook.
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, f := range tc.files {
+				makeFile(t, filepath.Join(root, filepath.FromSlash(f)))
+			}
+
+			// Record every path the WalkDir callback is invoked with.
+			visited := make(map[string]bool)
+			walkDirEntryHook = func(relPath string, isDir bool) {
+				visited[relPath] = true
+			}
+			t.Cleanup(func() { walkDirEntryHook = nil })
+
+			cfg, err := ScanDirectory(root, tc.filter)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for _, p := range tc.presentPaths {
+				if itemAtPath(cfg.Items, p) == nil {
+					t.Errorf("result: expected item at %q to be present", p)
+				}
+			}
+			for _, p := range tc.absentPaths {
+				if itemAtPath(cfg.Items, p) != nil {
+					t.Errorf("result: expected no item at %q, but found one", p)
+				}
+			}
+			// Verify pruning: files inside pruned directories must never have been
+			// handed to the WalkDir callback at all.
+			for _, f := range tc.neverVisitedFiles {
+				if visited[f] {
+					t.Errorf("pruning: WalkDir was called for %q, but it should have been pruned", f)
+				}
+			}
+		})
+	}
+}
+
 // TestProbeCompressedStatusTargetStatError covers the os.Stat(targetPath) error path
 // by deleting the target file during its duration probe (before the stat is called).
 func TestProbeCompressedStatusTargetStatError(t *testing.T) {
