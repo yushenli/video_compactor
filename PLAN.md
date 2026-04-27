@@ -1290,3 +1290,154 @@ Result: Only `2026_clip.mp4` at root level. ✅
 - Ancestor regexes handle multi-segment prefix patterns (e.g., `^201[456]/Jan`) by splitting at `/` boundaries, ensuring parent directories on the path are entered.
 - All regex compilation is done once at the start of `ScanDirectory`; the compiled regexes are reused for every directory encountered during the walk. No performance concern.
 - On Windows, `filepath.Separator` is `\`, but users write their filter regex with `\` too (since `filepath.Rel` returns `\`-separated paths). The prefix extraction just uses the raw characters, so it's platform-agnostic.
+
+## Feature: Reuse existing config when generating scan output
+
+### Goal
+
+Extend `scan` so it can optionally read an existing YAML config and carry forward matching user-authored settings into the newly generated config tree.
+
+For every scanned **directory node** and **video file node**, if the same relative path exists in the old config, copy all configurable fields from the old node except `compressed_status`.
+
+This supports two workflows:
+
+1. Rebuilding a config after an interrupted compression run without losing per-path tuning.
+2. Re-scanning before deleting compressed outputs so the regenerated file still shows both prior custom settings and freshly probed compression status side by side.
+
+### CLI changes
+
+Extend the scan command from:
+
+```text
+video_compactor scan <directory> [-o output.yaml] [--force] [--filter <regex>]
+```
+
+to:
+
+```text
+video_compactor scan <directory> [-o output.yaml] [--force] [--filter <regex>] [--from-config <path>] [--update]
+```
+
+New flags:
+
+- `--from-config <path>`: load an existing config and reuse matching node settings while generating the new config.
+- `--update`: shorthand for:
+  - `--from-config <output path>`
+  - `--force=true`
+
+Validation / precedence:
+
+1. If `--update` is set, derive `fromConfigPath` from the final resolved output path.
+2. If both `--update` and `--from-config` are provided, treat that as invalid flag usage and return an error.
+3. Existing `--force` behaviour remains unchanged unless `--update` is used, in which case overwrite is implicitly enabled.
+4. If `--from-config` is set, loading/parsing failures should fail the scan before writing any output.
+
+### Matching model
+
+Matching should be done by the scanned node's **relative path from the scan root**.
+
+Examples:
+
+- `movies/action` directory node matches `items.movies.items.action`
+- `movies/action/clip.mp4` file node matches the file node at the same relative path in the old config
+
+This keeps matching deterministic and independent from absolute filesystem location.
+
+### Reuse behaviour
+
+Implementation should keep scan discovery and config reuse separate:
+
+1. `scanner.ScanDirectory(...)` should still build a brand-new config tree from the filesystem and probe fresh `compressed_status` values.
+2. After scan generation, apply a second pass that walks the new tree and copies reusable fields from the old config tree when a matching node exists.
+3. Reuse logic should operate on both directories and files.
+
+Fields to copy from matching old nodes:
+
+- `quality`
+- `resolution`
+- `codec`
+- `tags`
+- `skip`
+
+Field that must **not** be copied:
+
+- `compressed_status`
+
+Recommended shape:
+
+- Add a helper under `internal/config` or `internal/scanner` that recursively walks two config trees in parallel by path.
+- Keep the copied-field list explicit rather than copying the whole node struct.
+- Preserve new scan defaults and new compressed-status probe results from the fresh scan.
+
+### Output write safety
+
+The old config and output config may be the same underlying file, including via hard links, so equality must be based on file identity rather than path string comparison.
+
+Planned handling:
+
+1. Resolve the final output path first.
+2. If `--from-config` is set, `os.Stat` both paths when possible and use `os.SameFile` to detect whether they reference the same underlying file.
+3. Load the old config before any output write.
+4. Generate the new config fully in memory.
+5. Write the generated YAML to a temporary file in the destination directory.
+6. Only after successful generation, copy the temp file contents over the destination path.
+7. Remove the temp file.
+
+Per your preference, this temp-write plus copy-overwrite flow can be used even when the source and destination are different files. That keeps the write path uniform and still preserves the destination inode when overwriting an existing file.
+
+### Code areas expected to change
+
+- `cmd/scan.go`
+  - add `--from-config`
+  - add `--update`
+  - resolve flag interactions
+  - load old config when requested
+  - route writing through temp-write/copy-overwrite save logic
+- `internal/scanner/scanner.go`
+  - likely keep filesystem scan focused on discovery/probing
+  - possibly add an option or helper hook only if it simplifies the post-scan merge cleanly
+- `internal/config/io.go`
+  - add helper(s) for temp write / copy-overwrite flow
+  - potentially add a reusable save helper for scan output updates
+- tests in:
+  - `cmd/scan_test.go`
+  - `internal/scanner/scanner_test.go`
+  - `internal/config/io_test.go`
+
+### Task breakdown
+
+1. **Add new scan flags** — extend `cmd/scan.go` with `--from-config` and `--update`, enforce invalid combinations, and make `--update` imply `--force`.
+
+2. **Load the existing config when requested** — if `--from-config` is present (or derived via `--update`), load and parse that config before generating output.
+
+3. **Add a config-reuse merge helper** — implement a helper that walks the new scan tree and old config tree by matching relative path, copying `quality`, `resolution`, `codec`, `tags`, and `skip` from old nodes into matching new nodes while leaving `compressed_status` untouched.
+
+4. **Keep scan discovery unchanged** — `scanner.ScanDirectory()` should continue to discover files, create directory nodes, and probe fresh compressed status data from the filesystem.
+
+5. **Add same-file detection** — use `os.Stat` plus `os.SameFile` so different paths to the same inode, including hard links, are handled correctly.
+
+6. **Add temp-write/copy-overwrite save flow** — write the new config to a temp file in the output directory, then copy it over the destination only after generation succeeds. Use the same flow for both same-file and different-file writes for simplicity.
+
+7. **Add/extend tests** — cover flag behaviour, reuse semantics for both directories and files, same-file/hard-link handling, and failure-safe output writes.
+
+8. **Run full test suite** to confirm no regressions.
+
+### Test plan for implementation
+
+Add coverage for:
+
+1. Scan with `--from-config` copies `quality`, `resolution`, `codec`, `tags`, and `skip` onto matching file nodes.
+2. The same copy behaviour also works for matching directory nodes.
+3. Missing old nodes do not create new nodes and do not affect scan results.
+4. `compressed_status` is always freshly generated and never copied from the old config.
+5. `--update` behaves like `--from-config=<output> --force=true`.
+6. `--update` plus `--from-config` returns an error.
+7. Same-file detection works even when the source and destination are different hard-link paths to the same inode.
+8. Output file is not replaced if generation fails before the final copy step.
+9. The temp-write/copy-overwrite path works both when source and destination are the same file and when they are different files.
+
+### Notes
+
+- Matching is path-based within the config tree, not based on absolute filesystem paths.
+- Keeping the copied fields explicit avoids accidentally carrying over `compressed_status` or future scan-generated metadata.
+- Using a uniform temp-write/copy-overwrite flow simplifies reasoning and keeps overwrite behaviour consistent.

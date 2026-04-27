@@ -34,3 +34,46 @@ type Config struct {
 	Defaults Settings             `yaml:"defaults"`
 	Items    map[string]*ItemNode `yaml:"items"`
 }
+
+// CopyReusableSettings copies configurable fields from oldCfg into newCfg for
+// matching directory and file nodes. Scan-generated compressed_status metadata
+// is intentionally preserved from newCfg and never copied from oldCfg.
+func CopyReusableSettings(newCfg, oldCfg *Config) {
+	if newCfg == nil || oldCfg == nil {
+		return
+	}
+
+	copyReusableItemSettings(newCfg.Items, oldCfg.Items)
+}
+
+func copyReusableItemSettings(newItems, oldItems map[string]*ItemNode) {
+	if len(newItems) == 0 || len(oldItems) == 0 {
+		return
+	}
+
+	for name, newNode := range newItems {
+		oldNode := oldItems[name]
+		if newNode == nil || oldNode == nil || !nodesHaveSameKind(newNode, oldNode) {
+			continue
+		}
+
+		copyReusableNodeSettings(newNode, oldNode)
+		if newNode.Items != nil {
+			copyReusableItemSettings(newNode.Items, oldNode.Items)
+		}
+	}
+}
+
+func copyReusableNodeSettings(newNode, oldNode *ItemNode) {
+	newNode.Quality = oldNode.Quality
+	newNode.Resolution = oldNode.Resolution
+	newNode.Codec = oldNode.Codec
+	newNode.Tags = oldNode.Tags
+	newNode.Skip = oldNode.Skip
+}
+
+func nodesHaveSameKind(firstNode, secondNode *ItemNode) bool {
+	firstIsDirectory := firstNode.Items != nil
+	secondIsDirectory := secondNode.Items != nil
+	return firstIsDirectory == secondIsDirectory
+}
