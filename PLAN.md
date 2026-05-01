@@ -207,7 +207,10 @@ sem := make(chan struct{}, opts.MaxJobs)
 
 - Uses `filepath.WalkDir`
 - Included extensions (case-insensitive): `.mp4 .mkv .mov .avi .mpg`
-- Skips files whose basename matches `*.compressed.*` (already processed)
+- Skips files whose basename matches any built-in compressed-filename pattern.
+- The built-in compressed-filename patterns should include both the current
+  `*.compressed.*` convention and legacy patterns from older tools, such as
+  `GHPR6642a.avi`.
 - `map[string]*ItemNode` keys are always sorted alphabetically by yaml.v3 during marshal
 - When `--filter` is provided, each video file's relative path is tested with `re.MatchString(relPath)` (partial match); only matching files are inserted into the tree. Directory nodes with no matching files are never created.
 
@@ -417,7 +420,9 @@ Adding support for a new device is a single append to this slice. The default fo
 
 2. **Create `internal/filename/remap_test.go`** — tests covering all 6 GoPro patterns, non-matching files (DJI, Pixel, Xiaomi, generic), edge cases (case-insensitive prefix, sidecar files `.LRV`/`.THM`), and boundary conditions (chapter 26 → `z`).
 
-3. **Export `CompressedOutputPath`** — refactor the unexported `compressedOutputPath` in `internal/compressor/compressor.go` to an exported `CompressedOutputPath`. Apply `filename.RemapFilename` to the basename before inserting the `.compressed` suffix. Update callers.
+3. **Export compressed-output naming helpers** — keep `CompressedOutputPath` exported for the default
+   naming rule, and also expose a helper that takes one input filename/path and returns the ordered
+   `[]string` of possible compressed target filenames generated from all built-in naming rules.
 
 4. **Verify** — `go build ./...` and `go test ./...`
 
@@ -656,8 +661,12 @@ format (i.e. using the closest GB or MB). This should be done both in dryrun and
 
 #### Clarifications from design review
 
-- **Target file discovery**: Use the existing `filename.CompressedOutputPath()` function to derive the
-  expected compressed file path from the original.
+- **Target file discovery**: Do not assume there is only one valid compressed filename. The scanner
+  should probe an ordered built-in list of filename generators, including the current
+  `filename.CompressedOutputPath()` rule and legacy naming rules from older tools.
+- **Compressed-file exclusion during scan**: Do not assume only `*.compressed.*` outputs are already
+  compressed. The scanner should also use an ordered built-in list of regex patterns to recognize
+  compressed basenames and skip them as original input candidates during the walk.
 - **Bitrate fields**: `bitrate_origin` and `bitrate_target` refer to the **video stream bitrate only**
   (not overall file bitrate including audio).
 - **`unfinished` field value**: Should be `true` (not `false`) when the target is incomplete.
@@ -675,7 +684,7 @@ Add a new struct and a pointer field on `ItemNode`:
 
 ```go
 // CompressedStatus holds metadata about a previously compressed output file.
-// Present only when the scanner detects a matching .compressed.* file.
+// Present only when the scanner detects a matching compressed target file.
 type CompressedStatus struct {
     Unfinished      bool   `yaml:"unfinished,omitempty"`
     CompressedRatio string `yaml:"compressed_ratio,omitempty"` // e.g. "42%"
@@ -699,17 +708,34 @@ Using a pointer (`*CompressedStatus`) so that:
 
 Modify the `ScanDirectory` / `insertFileNode` workflow:
 
-1. After determining a file is a video and not a `.compressed.*` file, compute the target path via
-   `filename.CompressedOutputPath(absPath)`.
-2. `os.Stat()` the target path. If it doesn't exist, proceed as before (no `CompressedStatus`).
-3. If the target exists, call a new `probeCompressedStatus(originalPath, targetPath)` function that:
-   - Probes duration of both files using ffprobe.
-   - If ffprobe fails on either file, logs a warning and returns `&CompressedStatus{Unfinished: true}`.
-   - If durations differ by more than 2 seconds, returns `&CompressedStatus{Unfinished: true}`.
-   - Otherwise, probes file size (`os.Stat`) and video stream bitrate (rounded to nearest kbps)
-     for both files, computes `compressed_ratio` (as a string like `"42%"`), and returns the full
-     `CompressedStatus`.
-4. Attach the `CompressedStatus` to the `ItemNode`.
+1. After determining a file is a video and not a `.compressed.*` file, generate an ordered list of
+   candidate compressed target paths from the original path.
+2. The candidate list should come from an internal built-in slice of functions, for example
+   `type CompressedTargetNamer func(string) string`.
+3. The built-in list should include:
+   - the current default naming conversion via `filename.CompressedOutputPath(absPath)`
+   - one or more legacy conversions for older tools, including cases like
+     `GH056642.MP4` -> `GHPR6642a.avi`
+4. The generator helpers should also expose an exported function from the owning package so other
+   code can ask for all candidate compressed target names for a given input path, e.g. a helper that
+   takes one filename/path and returns an ordered `[]string` of possible target filenames.
+5. In parallel with the target generators, define an internal built-in ordered slice of regex
+   patterns for filenames that should be treated as already-compressed outputs during scanning.
+6. The regex list should include:
+   - the current `<stem>.compressed.<ext>` convention
+   - legacy output patterns from older tools, including names like `GHPR6642a.avi`
+7. Use the regex list in the scan walk so files matching any compressed-output pattern are skipped
+   rather than inserted as original video nodes.
+8. Probe the candidate paths in order, ignore duplicate resolved paths, and use the first existing
+   path as the matched compressed target. If none exist, proceed as before (no `CompressedStatus`).
+9. If a target exists, call a `probeCompressedStatus(originalPath, targetPath)` function that:
+    - Probes duration of both files using ffprobe.
+    - If ffprobe fails on either file, logs a warning and returns `&CompressedStatus{Unfinished: true}`.
+    - If durations differ by more than 2 seconds, returns `&CompressedStatus{Unfinished: true}`.
+    - Otherwise, probes file size (`os.Stat`) and video stream bitrate (rounded to nearest kbps)
+      for both files, computes `compressed_ratio` (as a string like `"42%"`), and returns the full
+      `CompressedStatus`.
+10. Attach the `CompressedStatus` to the `ItemNode`.
 
 The `insertFileNode` function signature changes to accept an optional `*CompressedStatus`:
 
@@ -872,14 +898,23 @@ items:
 1. **Add CompressedStatus to config model** — modify `internal/config/model.go`
 2. **Create probe package** — new `internal/probe/probe.go` with duration & bitrate helpers
 3. **Create probe tests** — new `internal/probe/probe_test.go`
-4. **Enhance scanner** — modify `internal/scanner/scanner.go` to detect and probe compressed files
-5. **Add scanner tests for compressed status** — update `internal/scanner/scanner_test.go`
-6. **Skip compressed in compress command** — modify `internal/compressor/compressor.go` `walkItems` to skip files with completed `CompressedStatus`
-7. **Create deleter package** — new `internal/deleter/deleter.go` with deletion logic & size formatting
-8. **Create deleter tests** — new `internal/deleter/deleter_test.go`
-9. **Add delete CLI command** — new `cmd/delete.go` with `--dryrun` / `-d` flag (default true)
-10. **Register delete command** — update `cmd/root.go`
-11. **Config roundtrip test** — update `internal/config/io_test.go` for CompressedStatus serialization
+4. **Add compressed-target generator helpers** — centralize the built-in candidate filename generators
+   and expose a public helper that returns the ordered candidate target filenames for one input path,
+   so the scanner can probe multiple naming conventions without duplicating naming logic
+5. **Add compressed-filename regex helpers** — centralize the built-in regex list used to recognize
+   already-compressed basenames during scan, including legacy output names
+6. **Enhance scanner** — modify `internal/scanner/scanner.go` to skip files matching any compressed
+   regex and to detect/probe compressed files by trying the ordered candidate target names instead of
+   a single hard-coded path
+7. **Add scanner tests for compressed status** — update `internal/scanner/scanner_test.go` to cover
+   default `.compressed.*` matches, legacy alternate-name matches, legacy compressed-name exclusion,
+   no-match cases, and duplicate-path handling
+8. **Skip compressed in compress command** — modify `internal/compressor/compressor.go` `walkItems` to skip files with completed `CompressedStatus`
+9. **Create deleter package** — new `internal/deleter/deleter.go` with deletion logic & size formatting
+10. **Create deleter tests** — new `internal/deleter/deleter_test.go`
+11. **Add delete CLI command** — new `cmd/delete.go` with `--dryrun` / `-d` flag (default true)
+12. **Register delete command** — update `cmd/root.go`
+13. **Config roundtrip test** — update `internal/config/io_test.go` for CompressedStatus serialization
 
 ---
 
